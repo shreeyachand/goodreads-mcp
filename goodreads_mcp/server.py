@@ -9,6 +9,7 @@ Tools (all public data, no auth):
     author_books        an author's bibliography (GraphQL)
     series_books        books in a series, with reading order (GraphQL)
     get_editions        published editions: formats/ISBNs (GraphQL)
+    book_lists          Listopia lists a book appears on (GraphQL)
     get_shelf           shelf RSS feed
     list_shelves        scraped from the review list page (best effort)
 
@@ -152,7 +153,7 @@ _Q_BOOK_IDS = (
     "query($id: Int!){ getBookByLegacyId(legacyId:$id){"
     " id legacyId titleComplete title"
     " work{ id }"
-    " primaryContributorEdge{ node{ id name } }"
+    " primaryContributorEdge{ node{ id name webUrl } }"
     " bookSeries{ userPosition series{ id title } } } }"
 )
 _Q_SIMILAR = """
@@ -194,6 +195,12 @@ query($input: GetWorksByContributorInput!, $pagination: PaginationInput){
     }
   }
 }"""
+_Q_BOOK_LISTS = """
+query($id: ID!, $limit: Int!){
+  getBookListsOfBook(id: $id, paginationInput: { limit: $limit }){
+    edges{ node{ legacyId title webUrl userListVotesCount listBooksCount } }
+  }
+}"""
 
 # Cap discovery result sizes (single-page queries).
 _MAX_DISCOVERY = 40
@@ -217,6 +224,7 @@ def _resolve_book_ids(book_id: str) -> dict[str, Any]:
         "work_kca": (book.get("work") or {}).get("id"),
         "contributor_kca": contributor.get("id"),
         "contributor_name": contributor.get("name"),
+        "contributor_url": contributor.get("webUrl"),
         "series_kca": series.get("id"),
         "series_title": series.get("title"),
     }
@@ -474,6 +482,7 @@ def author_books(book_id: str, limit: int = 20) -> dict[str, Any]:
     works = [_work_summary(e.get("node") or {}) for e in (conn.get("edges") or [])]
     return {
         "author": ids["contributor_name"],
+        "author_url": ids["contributor_url"],
         "total_works": conn.get("totalCount"),
         "returned": len(works),
         "works": works,
@@ -553,6 +562,38 @@ def get_editions(book_id: str, limit: int = 20) -> dict[str, Any]:
         "total_editions": conn.get("totalCount"),
         "returned": len(editions),
         "editions": editions,
+    }
+
+
+@mcp.tool()
+def book_lists(book_id: str, limit: int = 10) -> dict[str, Any]:
+    """List the Listopia lists a book appears on (e.g. "Best Dystopian
+    Fiction"), ordered by popularity.
+
+    Each list has its title, total member votes, how many books it contains,
+    and a 'url'. Good for "what kind of book is this / what's it grouped with"
+    and for discovery. limit capped at 40.
+    """
+    ids = _resolve_book_ids(book_id)
+    data = gr.graphql(
+        _Q_BOOK_LISTS, {"id": ids["book_kca"], "limit": min(limit, _MAX_DISCOVERY)}
+    )
+    edges = ((data.get("getBookListsOfBook") or {}).get("edges")) or []
+    lists = [
+        {
+            "list_id": (n := e.get("node") or {}).get("legacyId"),
+            "title": n.get("title"),
+            "votes": n.get("userListVotesCount"),
+            "books_count": n.get("listBooksCount"),
+            "url": n.get("webUrl"),
+        }
+        for e in edges
+    ]
+    return {
+        "book_id": ids["legacy_id"],
+        "title": ids["title"],
+        "returned": len(lists),
+        "lists": lists,
     }
 
 

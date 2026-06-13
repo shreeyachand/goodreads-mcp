@@ -132,6 +132,7 @@ def test_author_books_live():
 
     res = server.author_books("2767052", limit=5)  # Suzanne Collins
     assert res["author"] == "Suzanne Collins"
+    assert res["author_url"].startswith("https://www.goodreads.com/author/show/")
     assert res["total_works"] and res["total_works"] > 1
     titles = [w["title"] for w in res["works"]]
     assert "The Hunger Games" in titles
@@ -165,6 +166,17 @@ def test_get_editions_live():
     e = res["editions"][0]
     assert e["format"]
     assert e["url"].startswith("https://www.goodreads.com/book/show/")
+
+
+def test_book_lists_live():
+    from goodreads_mcp import server
+
+    res = server.book_lists("2767052", limit=5)
+    assert res["lists"]
+    lst = res["lists"][0]
+    assert lst["title"]
+    assert isinstance(lst["votes"], int) and lst["votes"] > 0
+    assert lst["url"].startswith("https://www.goodreads.com/list/show/")
 
 
 def test_get_shelf_rss_live():

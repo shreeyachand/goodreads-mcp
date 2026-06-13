@@ -13,6 +13,7 @@ A **read-only** MCP server for Goodreads — built without the Goodreads API, be
 | `author_books` | GraphQL — an author's bibliography (from any of their books) |
 | `series_books` | GraphQL — books in a series with reading-order placement |
 | `get_editions` | GraphQL — published editions (format, ISBN, publisher, date) |
+| `book_lists` | GraphQL — Listopia lists a book appears on (title, votes, size) |
 | `get_shelf` | stable (RSS) — public shelves |
 | `list_shelves` | best effort (HTML) — public profiles |
 
@@ -88,8 +89,13 @@ GOODREADS_LIVE=1 .venv/bin/pytest      # + live network smoke tests
 - **Polite client.** Single persistent session, browser-faithful headers, exponential backoff on 429/503; `get_reviews` caps paging at 100 reviews.
 - **Caveats**: all of this is unofficial and depends on markup/endpoints/keys that can drift.
 
+## shipped since v0.1
+
+- **richer book data** — `get_book` now includes the ratings histogram, series/position, and review-language breakdown; `series_books` and `similar_books` cover series and recommendations; `get_reviews` returns paginated, filterable reader reviews.
+- **author bibliography** — `author_books` returns an author's works (ranked by popularity) plus a link to their author page (`author_url`).
+
 ## ideas for v2
 
-- richer book data: series, similar books, top reviews from the Apollo state
-- author pages / bibliography
+- author page detail (bio, photo, follower count) — not currently exposed cleanly: the author page is legacy server-rendered HTML with no structured JSON, and there's no discoverable GraphQL contributor-detail query, so this would require brittle DOM scraping. `author_books` links to the page instead.
+- `compare_books([ids])` — fan-out helper to rank several titles by rating/histogram
 - caching layer for repeated lookups
