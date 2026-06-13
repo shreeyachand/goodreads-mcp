@@ -179,6 +179,34 @@ def test_book_lists_live():
     assert lst["url"].startswith("https://www.goodreads.com/list/show/")
 
 
+def test_popular_books_year_live():
+    from goodreads_mcp import server
+
+    res = server.popular_books(2025, limit=5)  # whole year (Work nodes)
+    assert res["returned"] == 5
+    b = res["books"][0]
+    assert b["rank"] == 1
+    assert b["title"] and b["author"]
+    assert isinstance(b["count"], int) and b["count"] > 0
+    assert b["url"].startswith("https://www.goodreads.com/book/show/")
+
+
+def test_popular_books_month_paginates_live():
+    from goodreads_mcp import server
+
+    res = server.popular_books(2025, 12, limit=35)  # month (Book nodes), >1 page
+    assert res["returned"] == 35
+    assert [b["rank"] for b in res["books"][:3]] == [1, 2, 3]
+    assert all(b["title"] and b["url"] for b in res["books"])
+
+
+def test_popular_books_rejects_bad_month_live():
+    from goodreads_mcp import server
+
+    with pytest.raises(ValueError):
+        server.popular_books(2025, 13)
+
+
 def test_get_shelf_rss_live():
     from goodreads_mcp import server
 

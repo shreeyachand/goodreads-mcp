@@ -10,6 +10,7 @@ Tools (all public data, no auth):
     series_books        books in a series, with reading order (GraphQL)
     get_editions        published editions: formats/ISBNs (GraphQL)
     book_lists          Listopia lists a book appears on (GraphQL)
+    popular_books       most popular books by release year/month (GraphQL)
     get_shelf           shelf RSS feed
     list_shelves        scraped from the review list page (best effort)
 
@@ -201,9 +202,36 @@ query($id: ID!, $limit: Int!){
     edges{ node{ legacyId title webUrl userListVotesCount listBooksCount } }
   }
 }"""
+_Q_TOP_LIST = """
+query($name: String!, $period: String!, $location: String!,
+      $after: String, $limit: Int){
+  getTopList(
+    getTopListInput: { name: $name, period: $period, location: $location },
+    pagination: { after: $after, limit: $limit }
+  ){
+    pageInfo{ hasNextPage nextPageToken }
+    edges{
+      ... on TopListBookEdge {
+        rank count
+        node{ __typename legacyId title webUrl
+          work{ stats{ averageRating ratingsCount } }
+          primaryContributorEdge{ node{ name } } }
+      }
+      ... on TopListWorkEdge {
+        rank count
+        node{ __typename stats{ averageRating ratingsCount }
+          details{ bestBook{ legacyId title webUrl
+            primaryContributorEdge{ node{ name } } } } }
+      }
+    }
+  }
+}"""
 
 # Cap discovery result sizes (single-page queries).
 _MAX_DISCOVERY = 40
+# popular_books paginates; cap total and page size.
+_MAX_POPULAR = 50
+_POPULAR_PAGE_SIZE = 30
 
 
 def _resolve_book_ids(book_id: str) -> dict[str, Any]:
@@ -257,6 +285,27 @@ def _work_summary(node: dict[str, Any]) -> dict[str, Any]:
         "ratings_count": stats.get("ratingsCount"),
         "url": best.get("webUrl"),
     }
+
+
+def _node_summary(node: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a node that may be a Book or a Work to a compact summary.
+
+    Work nodes expose their representative book at details.bestBook (the
+    top-list shape) or directly at bestBook.
+    """
+    if node.get("__typename") == "Work":
+        best = (node.get("details") or {}).get("bestBook") or node.get("bestBook") or {}
+        stats = node.get("stats") or {}
+        author = (best.get("primaryContributorEdge") or {}).get("node") or {}
+        return {
+            "book_id": best.get("legacyId"),
+            "title": best.get("title"),
+            "author": author.get("name"),
+            "average_rating": stats.get("averageRating"),
+            "ratings_count": stats.get("ratingsCount"),
+            "url": best.get("webUrl"),
+        }
+    return _book_summary(node)
 
 
 # ===================================================================== READ
@@ -594,6 +643,69 @@ def book_lists(book_id: str, limit: int = 10) -> dict[str, Any]:
         "title": ids["title"],
         "returned": len(lists),
         "lists": lists,
+    }
+
+
+@mcp.tool()
+def popular_books(
+    year: int,
+    month: int | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Most popular books by release date — Goodreads' "Popular by date" chart.
+
+    Ranks the books/works released in a given year (or a specific month of a
+    year) by how many Goodreads members have added them. Mirrors the
+    goodreads.com/book/popular_by_date/<year>[/<month>] page.
+
+    year: 4-digit release year.
+    month: optional 1-12 for a single month; omit for the whole year.
+    limit: how many to return (capped at 50).
+
+    Each entry has rank, count (members who added it), and the usual
+    book_id/title/author/rating/url so you can chain into get_book/get_reviews.
+    """
+    if month is not None and not 1 <= month <= 12:
+        raise ValueError("month must be between 1 and 12.")
+    name = (
+        f"books-by-release-date-{year}-{month}"
+        if month is not None
+        else f"works-by-release-date-{year}"
+    )
+    want = max(0, min(limit, _MAX_POPULAR))
+
+    entries: list[dict[str, Any]] = []
+    token: str | None = None
+    while len(entries) < want:
+        page = gr.graphql(
+            _Q_TOP_LIST,
+            {
+                "name": name,
+                "period": "A",
+                "location": "ALL",
+                "after": token,
+                "limit": _POPULAR_PAGE_SIZE,
+            },
+        ).get("getTopList") or {}
+        edges = page.get("edges") or []
+        for edge in edges:
+            if not edge or not edge.get("node"):
+                continue
+            entry = {"rank": edge.get("rank"), "count": edge.get("count")}
+            entry.update(_node_summary(edge["node"]))
+            entries.append(entry)
+            if len(entries) >= want:
+                break
+        info = page.get("pageInfo") or {}
+        token = info.get("nextPageToken")
+        if not token or not edges or not info.get("hasNextPage"):
+            break
+
+    return {
+        "year": year,
+        "month": month,
+        "returned": len(entries),
+        "books": entries,
     }
 
 

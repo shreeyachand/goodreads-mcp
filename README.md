@@ -14,6 +14,7 @@ A **read-only** MCP server for Goodreads — built without the Goodreads API, be
 | `series_books` | GraphQL — books in a series with reading-order placement |
 | `get_editions` | GraphQL — published editions (format, ISBN, publisher, date) |
 | `book_lists` | GraphQL — Listopia lists a book appears on (title, votes, size) |
+| `popular_books` | GraphQL — most popular books by release year (or year+month), ranked |
 | `get_shelf` | stable (RSS) — public shelves |
 | `list_shelves` | best effort (HTML) — public profiles |
 
