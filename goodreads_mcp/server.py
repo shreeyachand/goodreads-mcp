@@ -11,6 +11,7 @@ Tools (all public data, no auth):
     get_editions        published editions: formats/ISBNs (GraphQL)
     book_lists          Listopia lists a book appears on (GraphQL)
     popular_books       most popular books by release year/month (GraphQL)
+    compare_books       rank several books by rating + polarization
     get_shelf           shelf RSS feed
     list_shelves        scraped from the review list page (best effort)
 
@@ -232,6 +233,8 @@ _MAX_DISCOVERY = 40
 # popular_books paginates; cap total and page size.
 _MAX_POPULAR = 50
 _POPULAR_PAGE_SIZE = 30
+# compare_books fetches one book page per id; cap the fan-out.
+_MAX_COMPARE = 10
 
 
 def _resolve_book_ids(book_id: str) -> dict[str, Any]:
@@ -706,6 +709,54 @@ def popular_books(
         "month": month,
         "returned": len(entries),
         "books": entries,
+    }
+
+
+@mcp.tool()
+def compare_books(book_ids: list[str]) -> dict[str, Any]:
+    """Compare several books side by side by rating and rating distribution.
+
+    Fetches each book and returns them ranked best-to-worst by average rating,
+    with the ratings_histogram plus 'pct_positive' (share of 4-5 star) and
+    'pct_critical' (share of 1-2 star) so you can judge not just the average
+    but how divisive each book is. Pass 2-10 book ids (from search_books etc.).
+    """
+    if not book_ids:
+        raise ValueError("Provide at least one book_id to compare.")
+
+    results: list[dict[str, Any]] = []
+    for bid in book_ids[:_MAX_COMPARE]:
+        try:
+            b = get_book(bid)
+        except Exception as e:  # noqa: BLE001 — report per-book, don't abort all
+            results.append({"book_id": bid, "error": str(e)})
+            continue
+        hist = b.get("ratings_histogram") or {}
+        total = sum(v for v in hist.values() if isinstance(v, int))
+        crit = (hist.get("1") or 0) + (hist.get("2") or 0)
+        pos = (hist.get("4") or 0) + (hist.get("5") or 0)
+        results.append(
+            {
+                "book_id": b.get("book_id"),
+                "title": b.get("title"),
+                "author": b.get("author"),
+                "average_rating": b.get("average_rating"),
+                "ratings_count": b.get("ratings_count"),
+                "text_reviews_count": b.get("text_reviews_count"),
+                "ratings_histogram": hist or None,
+                "pct_positive": round(100 * pos / total, 1) if total else None,
+                "pct_critical": round(100 * crit / total, 1) if total else None,
+                "url": b.get("url"),
+            }
+        )
+
+    rated = [r for r in results if r.get("average_rating") is not None]
+    errored = [r for r in results if "error" in r]
+    rated.sort(key=lambda r: r["average_rating"], reverse=True)
+    return {
+        "compared": len(rated),
+        "ranked_by": "average_rating (desc)",
+        "books": rated + errored,
     }
 
 

@@ -15,6 +15,7 @@ A **read-only** MCP server for Goodreads — built without the Goodreads API, be
 | `get_editions` | GraphQL — published editions (format, ISBN, publisher, date) |
 | `book_lists` | GraphQL — Listopia lists a book appears on (title, votes, size) |
 | `popular_books` | GraphQL — most popular books by release year (or year+month), ranked |
+| `compare_books` | takes several book ids, ranks them by rating with positive/critical share |
 | `get_shelf` | stable (RSS) — public shelves |
 | `list_shelves` | best effort (HTML) — public profiles |
 
@@ -98,5 +99,4 @@ GOODREADS_LIVE=1 .venv/bin/pytest      # + live network smoke tests
 ## ideas for v2
 
 - author page detail (bio, photo, follower count) — not currently exposed cleanly: the author page is legacy server-rendered HTML with no structured JSON, and there's no discoverable GraphQL contributor-detail query, so this would require brittle DOM scraping. `author_books` links to the page instead.
-- `compare_books([ids])` — fan-out helper to rank several titles by rating/histogram
-- caching layer for repeated lookups
+- caching layer for repeated lookups (the discovery tools each resolve the book first; a small TTL cache would cut duplicate GraphQL calls)

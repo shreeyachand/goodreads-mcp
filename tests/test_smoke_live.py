@@ -13,6 +13,9 @@ import os
 
 import pytest
 
+from goodreads_mcp import server
+from goodreads_mcp.client import GoodreadsClient
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("GOODREADS_LIVE") != "1",
     reason="set GOODREADS_LIVE=1 to run live network smoke tests",
@@ -20,8 +23,6 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_search_books_live():
-    from goodreads_mcp import server
-
     results = server.search_books("project hail mary", max_results=3)
     assert results, "autocomplete returned nothing"
     top = results[0]
@@ -31,8 +32,6 @@ def test_search_books_live():
 
 def test_get_book_live_bypasses_waf():
     """Regression guard: the plain book page is WAF-gated; .xml must work."""
-    from goodreads_mcp import server
-
     book = server.get_book("54493401")
     assert book["title"] == "Project Hail Mary"
     assert book["author"]
@@ -40,15 +39,11 @@ def test_get_book_live_bypasses_waf():
 
 
 def test_get_book_accepts_slug_form_live():
-    from goodreads_mcp import server
-
     book = server.get_book("11870085-the-fault-in-our-stars")
     assert book["book_id"] == 11870085
 
 
 def test_get_book_histogram_and_languages_live():
-    from goodreads_mcp import server
-
     book = server.get_book("54493401")
     hist = book["ratings_histogram"]
     assert set(hist) == {"1", "2", "3", "4", "5"}
@@ -60,24 +55,18 @@ def test_get_book_histogram_and_languages_live():
 
 
 def test_get_book_series_position_live():
-    from goodreads_mcp import server
-
     book = server.get_book("2767052")  # The Hunger Games, book 1
     assert book["series"]
     assert book["series_position"] == "1"
 
 
 def test_graphql_config_resolves_live():
-    from goodreads_mcp.client import GoodreadsClient
-
     endpoint, key = GoodreadsClient().graphql_config(force=True)
     assert "appsync-api" in endpoint and endpoint.endswith("/graphql")
     assert key.startswith("da2-")
 
 
 def test_get_reviews_live():
-    from goodreads_mcp import server
-
     res = server.get_reviews("54493401", limit=5)
     assert res["returned"] == 5
     assert res["total_text_reviews"] and res["total_text_reviews"] > 1000
@@ -93,15 +82,11 @@ def test_get_reviews_live():
 
 def test_get_reviews_paginates_past_30_live():
     """The whole point of the GraphQL backbone: more than one page."""
-    from goodreads_mcp import server
-
     res = server.get_reviews("54493401", limit=45)
     assert res["returned"] == 45
 
 
 def test_get_reviews_rating_filters_live():
-    from goodreads_mcp import server
-
     # positive
     pos = server.get_reviews(
         "2767052", limit=20, min_rating=5, exclude_spoilers=True
@@ -118,8 +103,6 @@ def test_get_reviews_rating_filters_live():
 
 
 def test_similar_books_live():
-    from goodreads_mcp import server
-
     res = server.similar_books("2767052", limit=5)
     assert len(res["similar"]) == 5
     b = res["similar"][0]
@@ -128,8 +111,6 @@ def test_similar_books_live():
 
 
 def test_author_books_live():
-    from goodreads_mcp import server
-
     res = server.author_books("2767052", limit=5)  # Suzanne Collins
     assert res["author"] == "Suzanne Collins"
     assert res["author_url"].startswith("https://www.goodreads.com/author/show/")
@@ -139,8 +120,6 @@ def test_author_books_live():
 
 
 def test_series_books_live():
-    from goodreads_mcp import server
-
     res = server.series_books("2767052", limit=10)
     assert res["series"] == "The Hunger Games"
     # the main-sequence book 1 should be present and flagged primary
@@ -150,16 +129,12 @@ def test_series_books_live():
 
 
 def test_series_books_standalone_returns_note_live():
-    from goodreads_mcp import server
-
     res = server.series_books("54493401")  # Project Hail Mary, standalone
     assert res["series"] is None
     assert res["books"] == []
 
 
 def test_get_editions_live():
-    from goodreads_mcp import server
-
     res = server.get_editions("2767052", limit=5)
     assert res["total_editions"] and res["total_editions"] > 1
     assert len(res["editions"]) == 5
@@ -169,8 +144,6 @@ def test_get_editions_live():
 
 
 def test_book_lists_live():
-    from goodreads_mcp import server
-
     res = server.book_lists("2767052", limit=5)
     assert res["lists"]
     lst = res["lists"][0]
@@ -180,8 +153,6 @@ def test_book_lists_live():
 
 
 def test_popular_books_year_live():
-    from goodreads_mcp import server
-
     res = server.popular_books(2025, limit=5)  # whole year (Work nodes)
     assert res["returned"] == 5
     b = res["books"][0]
@@ -192,8 +163,6 @@ def test_popular_books_year_live():
 
 
 def test_popular_books_month_paginates_live():
-    from goodreads_mcp import server
-
     res = server.popular_books(2025, 12, limit=35)  # month (Book nodes), >1 page
     assert res["returned"] == 35
     assert [b["rank"] for b in res["books"][:3]] == [1, 2, 3]
@@ -201,15 +170,29 @@ def test_popular_books_month_paginates_live():
 
 
 def test_popular_books_rejects_bad_month_live():
-    from goodreads_mcp import server
-
     with pytest.raises(ValueError):
         server.popular_books(2025, 13)
 
 
-def test_get_shelf_rss_live():
-    from goodreads_mcp import server
+def test_compare_books_live():
+    res = server.compare_books(["54493401", "11870085-the-fault-in-our-stars"])
+    assert res["compared"] == 2
+    ratings = [b["average_rating"] for b in res["books"]]
+    assert ratings == sorted(ratings, reverse=True)  # ranked best-first
+    top = res["books"][0]
+    assert 0 <= top["pct_positive"] <= 100
+    assert 0 <= top["pct_critical"] <= 100
+    assert top["url"]
 
+
+def test_compare_books_reports_bad_id_live():
+    res = server.compare_books(["54493401", "definitely-not-a-real-book-id-x"])
+    # the good one still ranks; the bad one is reported, not fatal
+    assert any("error" in b for b in res["books"])
+    assert any(b.get("title") == "Project Hail Mary" for b in res["books"])
+
+
+def test_get_shelf_rss_live():
     # user 1 (Otis Chandler, GR founder) has a large public 'read' shelf
     items = server.get_shelf("read", user_id="1", page=1)
     assert items, "shelf RSS returned no items"
