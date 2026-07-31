@@ -29,6 +29,7 @@ import html as html_mod
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 
@@ -333,7 +334,7 @@ def search_books(query: str, max_results: int = 10) -> list[dict[str, Any]]:
                 "ratings_count": b.get("ratingsCount"),
                 "pages": b.get("numPages"),
                 "cover": b.get("imageUrl"),
-                "url": BASE + b.get("bookUrl", ""),
+                "url": BASE + (b.get("bookUrl") or ""),
                 "description": html_mod.unescape(
                     re.sub(r"<[^>]+>", "", (b.get("description") or {}).get("html", ""))
                 )[:400],
@@ -750,13 +751,15 @@ def compare_books(book_ids: list[str]) -> dict[str, Any]:
             }
         )
 
-    rated = [r for r in results if r.get("average_rating") is not None]
+    ok = [r for r in results if "error" not in r]
     errored = [r for r in results if "error" in r]
+    rated = [r for r in ok if r.get("average_rating") is not None]
+    unrated = [r for r in ok if r.get("average_rating") is None]
     rated.sort(key=lambda r: r["average_rating"], reverse=True)
     return {
-        "compared": len(rated),
+        "compared": len(ok),
         "ranked_by": "average_rating (desc)",
-        "books": rated + errored,
+        "books": rated + unrated + errored,
     }
 
 
@@ -788,7 +791,7 @@ def list_shelves(user_id: str | None = None) -> list[str]:
     names = re.findall(r'[?&]shelf=([A-Za-z0-9_%\-]+)', page)
     seen: dict[str, None] = {}
     for n in names:
-        seen.setdefault(html_mod.unescape(n), None)
+        seen.setdefault(unquote(html_mod.unescape(n)), None)
     return list(seen)
 
 

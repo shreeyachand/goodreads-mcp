@@ -171,20 +171,34 @@ class GoodreadsClient:
             self._graphql_config = (GRAPHQL_FALLBACK_ENDPOINT, GRAPHQL_FALLBACK_KEY)
         return self._graphql_config
 
+    def _graphql_post(
+        self, endpoint: str, key: str, query: str, variables: dict[str, Any] | None
+    ) -> httpx.Response:
+        return self._request(
+            "POST",
+            endpoint,
+            headers={"x-api-key": key, "content-type": "application/json"},
+            json={"query": query, "variables": variables or {}},
+        )
+
     def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict:
         """POST a GraphQL query to AppSync and return its `data`.
 
         Tolerates field-level errors (GraphQL partial success — e.g. a
         deleted review's sub-resource resolves to null). Only raises
         GraphQLError when `data` is absent, i.e. the query truly failed.
+
+        If the key/endpoint has rotated (401/403), re-discovers it once and
+        retries before giving up.
         """
         endpoint, key = self.graphql_config()
-        resp = self.client.post(
-            endpoint,
-            headers={"x-api-key": key, "content-type": "application/json"},
-            json={"query": query, "variables": variables or {}},
-        )
-        resp.raise_for_status()
+        try:
+            resp = self._graphql_post(endpoint, key, query, variables)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code not in (401, 403):
+                raise
+            endpoint, key = self.graphql_config(force=True)
+            resp = self._graphql_post(endpoint, key, query, variables)
         body = resp.json()
         data = body.get("data")
         if data is None:
