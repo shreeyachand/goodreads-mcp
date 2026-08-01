@@ -32,6 +32,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .cache import ttl_cache
 from .client import BASE, GoodreadsClient
 from .config import load_user_id
 
@@ -57,6 +58,12 @@ inventing a link.
 mcp = FastMCP("goodreads", instructions=SERVER_INSTRUCTIONS)
 gr = GoodreadsClient()
 DEFAULT_USER_ID = load_user_id()
+
+# Cache only stable, read-only lookup results. Five minutes is long enough to
+# collapse repeated tool chains without making changing Goodreads stats feel
+# stale for the lifetime of an MCP session.
+_CACHE_TTL_SECONDS = 300
+_BOOK_CACHE_SIZE = 128
 
 
 def _user_id(user_id: str | None) -> str:
@@ -85,6 +92,7 @@ def _ms_to_iso(ms: Any) -> str | None:
         return None
 
 
+@ttl_cache(maxsize=_BOOK_CACHE_SIZE, ttl_seconds=_CACHE_TTL_SECONDS)
 def _fetch_book_apollo(book_id: str) -> dict[str, Any]:
     """Fetch a book page and return its Apollo state.
 
@@ -159,8 +167,9 @@ _Q_BOOK_IDS = (
     " bookSeries{ userPosition series{ id title } } } }"
 )
 _Q_SIMILAR = """
-query($id: ID!, $limit: Int!){
-  getSimilarBooks(id: $id, pagination: { limit: $limit }){
+query($id: ID!, $pagination: PaginationInput){
+  getSimilarBooks(id: $id, pagination: $pagination){
+    pageInfo{ hasNextPage nextPageToken }
     edges{ node{
       legacyId title webUrl imageUrl
       work{ stats{ averageRating ratingsCount } }
@@ -169,11 +178,12 @@ query($id: ID!, $limit: Int!){
   }
 }"""
 _Q_EDITIONS = """
-query($id: ID!, $limit: Int!){
-  getEditions(id: $id, pagination: { limit: $limit }){
+query($id: ID!, $pagination: PaginationInput){
+  getEditions(id: $id, pagination: $pagination){
     totalCount
+    pageInfo{ hasNextPage nextPageToken }
     edges{ node{
-      legacyId title webUrl
+      legacyId title webUrl imageUrl
       details{ format publicationTime publisher isbn13 numPages language{ name } }
     }}
   }
@@ -181,10 +191,11 @@ query($id: ID!, $limit: Int!){
 _Q_SERIES = """
 query($input: GetWorksForSeriesInput!, $pagination: PaginationInput){
   getWorksForSeries(getWorksForSeriesInput: $input, pagination: $pagination){
+    pageInfo{ hasNextPage nextPageToken }
     edges{
       seriesPlacement isPrimary
       node{ stats{ averageRating ratingsCount } bestBook{
-        legacyId title webUrl primaryContributorEdge{ node{ name } } } }
+        legacyId title webUrl imageUrl primaryContributorEdge{ node{ name } } } }
     }
   }
 }"""
@@ -192,14 +203,16 @@ _Q_AUTHOR = """
 query($input: GetWorksByContributorInput!, $pagination: PaginationInput){
   getWorksByContributor(getWorksByContributorInput: $input, pagination: $pagination){
     totalCount
+    pageInfo{ hasNextPage nextPageToken }
     edges{ node{ stats{ averageRating ratingsCount } bestBook{
-      legacyId title webUrl primaryContributorEdge{ node{ name } } } }
+      legacyId title webUrl imageUrl primaryContributorEdge{ node{ name } } } }
     }
   }
 }"""
 _Q_BOOK_LISTS = """
-query($id: ID!, $limit: Int!){
-  getBookListsOfBook(id: $id, paginationInput: { limit: $limit }){
+query($id: ID!, $pagination: PaginationInput){
+  getBookListsOfBook(id: $id, paginationInput: $pagination){
+    pageInfo{ hasNextPage nextPageToken }
     edges{ node{ legacyId title webUrl userListVotesCount listBooksCount } }
   }
 }"""
@@ -214,22 +227,23 @@ query($name: String!, $period: String!, $location: String!,
     edges{
       ... on TopListBookEdge {
         rank count
-        node{ __typename legacyId title webUrl
+        node{ __typename legacyId title webUrl imageUrl
           work{ stats{ averageRating ratingsCount } }
           primaryContributorEdge{ node{ name } } }
       }
       ... on TopListWorkEdge {
         rank count
         node{ __typename stats{ averageRating ratingsCount }
-          details{ bestBook{ legacyId title webUrl
+          details{ bestBook{ legacyId title webUrl imageUrl
             primaryContributorEdge{ node{ name } } } } }
       }
     }
   }
 }"""
 
-# Cap discovery result sizes (single-page queries).
-_MAX_DISCOVERY = 40
+# Discovery connections are paginated in small requests and capped in total.
+_MAX_DISCOVERY = 100
+_DISCOVERY_PAGE_SIZE = 20
 # popular_books paginates; cap total and page size.
 _MAX_POPULAR = 50
 _POPULAR_PAGE_SIZE = 30
@@ -237,17 +251,86 @@ _POPULAR_PAGE_SIZE = 30
 _MAX_COMPARE = 10
 
 
+def _validate_discovery_limit(limit: int) -> int:
+    if limit < 0:
+        raise ValueError("limit must be zero or greater.")
+    return min(limit, _MAX_DISCOVERY)
+
+
+def _paginated_graphql_edges(
+    query: str,
+    connection_name: str,
+    variables: dict[str, Any],
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool, int | None]:
+    """Collect a bounded number of edges from a GraphQL connection.
+
+    Returns ``(edges, has_more, total_count)``. Every supported discovery
+    connection uses Goodreads' standard PaginationInput and PageInfo shapes.
+    """
+    want = _validate_discovery_limit(limit)
+    if want == 0:
+        return [], False, None
+
+    collected: list[dict[str, Any]] = []
+    token: str | None = None
+    total_count: int | None = None
+    has_more = False
+    seen_tokens: set[str] = set()
+
+    while len(collected) < want:
+        pagination: dict[str, Any] = {
+            "limit": min(_DISCOVERY_PAGE_SIZE, want - len(collected))
+        }
+        if token:
+            pagination["after"] = token
+        page_variables = {**variables, "pagination": pagination}
+        connection = gr.graphql(query, page_variables).get(connection_name) or {}
+        if total_count is None:
+            total_count = connection.get("totalCount")
+
+        page_edges = [e for e in (connection.get("edges") or []) if e]
+        remaining = want - len(collected)
+        collected.extend(page_edges[:remaining])
+
+        info = connection.get("pageInfo") or {}
+        next_token = info.get("nextPageToken")
+        has_more = bool(info.get("hasNextPage") and next_token)
+        if len(page_edges) > remaining:
+            has_more = True
+        if len(collected) >= want or not page_edges or not has_more:
+            break
+        if next_token in seen_tokens:
+            break
+        seen_tokens.add(next_token)
+        token = next_token
+
+    if total_count is not None and len(collected) < total_count:
+        has_more = True
+    return collected, has_more, total_count
+
+
+@ttl_cache(maxsize=_BOOK_CACHE_SIZE, ttl_seconds=_CACHE_TTL_SECONDS)
 def _resolve_book_ids(book_id: str) -> dict[str, Any]:
-    """Resolve a book_id to its kca ids (book/work/contributor/series) plus
-    legacyId and title, via one getBookByLegacyId call."""
+    """Resolve a book_id to its book/work/contributor/series identifiers,
+    legacyId, title, and every series membership in one GraphQL call."""
     book = gr.graphql(_Q_BOOK_IDS, {"id": _legacy_id(book_id)}).get(
         "getBookByLegacyId"
     )
     if not book:
         raise ValueError(f"No book found for id {book_id!r}.")
     contributor = (book.get("primaryContributorEdge") or {}).get("node") or {}
-    series_list = book.get("bookSeries") or []
-    series = (series_list[0].get("series") or {}) if series_list else {}
+    series_memberships = []
+    for membership in book.get("bookSeries") or []:
+        series = membership.get("series") or {}
+        series_memberships.append(
+            {
+                "id": series.get("id"),
+                "title": series.get("title"),
+                "position": membership.get("userPosition"),
+            }
+        )
+    first_series = series_memberships[0] if series_memberships else {}
     return {
         "legacy_id": book.get("legacyId"),
         "title": book.get("titleComplete") or book.get("title"),
@@ -256,8 +339,9 @@ def _resolve_book_ids(book_id: str) -> dict[str, Any]:
         "contributor_kca": contributor.get("id"),
         "contributor_name": contributor.get("name"),
         "contributor_url": contributor.get("webUrl"),
-        "series_kca": series.get("id"),
-        "series_title": series.get("title"),
+        "series_kca": first_series.get("id"),
+        "series_title": first_series.get("title"),
+        "series_memberships": series_memberships,
     }
 
 
@@ -271,6 +355,7 @@ def _book_summary(node: dict[str, Any]) -> dict[str, Any]:
         "author": author.get("name"),
         "average_rating": stats.get("averageRating"),
         "ratings_count": stats.get("ratingsCount"),
+        "cover": node.get("imageUrl"),
         "url": node.get("webUrl"),
     }
 
@@ -286,6 +371,7 @@ def _work_summary(node: dict[str, Any]) -> dict[str, Any]:
         "author": author.get("name"),
         "average_rating": stats.get("averageRating"),
         "ratings_count": stats.get("ratingsCount"),
+        "cover": best.get("imageUrl"),
         "url": best.get("webUrl"),
     }
 
@@ -306,6 +392,7 @@ def _node_summary(node: dict[str, Any]) -> dict[str, Any]:
             "author": author.get("name"),
             "average_rating": stats.get("averageRating"),
             "ratings_count": stats.get("ratingsCount"),
+            "cover": best.get("imageUrl"),
             "url": best.get("webUrl"),
         }
     return _book_summary(node)
@@ -343,17 +430,20 @@ def search_books(query: str, max_results: int = 10) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_book(book_id: str) -> dict[str, Any]:
+def get_book(book_id: str, review_language_limit: int = 5) -> dict[str, Any]:
     """Get full details for a book by its Goodreads id (numeric, or numeric-slug
     like '11870085-the-fault-in-our-stars').
 
     Parses the page's embedded __NEXT_DATA__ JSON (Apollo state) rather than
     scraping the DOM, which survives markup changes. Includes the full
-    ratings histogram, series/position, and review-language breakdown — use
-    get_reviews for the actual review text.
+    ratings histogram, all series memberships, and review-language breakdown
+    — use get_reviews for the actual review text. review_language_limit controls
+    how many languages are returned (default 5, maximum 25).
 
     When you cite details or ratings from this book, link to its 'url'.
     """
+    if review_language_limit < 0:
+        raise ValueError("review_language_limit must be zero or greater.")
     apollo = _fetch_book_apollo(book_id)
     deref = _make_deref(apollo)
     book = _find_book(apollo, book_id)
@@ -374,24 +464,39 @@ def get_book(book_id: str) -> dict[str, Any]:
         else None
     )
 
-    # Series + reading position (first series only; most books have one).
-    series = series_position = None
+    # Preserve the original first-series fields for compatibility, while also
+    # exposing every series membership in the embedded Apollo state.
+    series_memberships = []
     book_series = book.get("bookSeries") or []
-    if book_series:
-        series = deref(book_series[0].get("series")).get("title")
-        series_position = book_series[0].get("userPosition")
+    for membership in book_series:
+        series_node = deref(membership.get("series"))
+        series_memberships.append(
+            {
+                "series": series_node.get("title"),
+                "position": membership.get("userPosition"),
+            }
+        )
+    series = series_memberships[0]["series"] if series_memberships else None
+    series_position = (
+        series_memberships[0]["position"] if series_memberships else None
+    )
 
-    # Review-language breakdown (top languages by text-review count).
+    language_limit = min(review_language_limit, 25)
+    # Review-language breakdown, ordered by text-review count.
     langs = stats.get("textReviewsLanguageCounts") or []
     review_languages = {
         lang.get("isoLanguageCode"): lang.get("count")
-        for lang in sorted(langs, key=lambda x: -(x.get("count") or 0))[:5]
+        for lang in sorted(langs, key=lambda x: -(x.get("count") or 0))[
+            :language_limit
+        ]
+        if lang.get("isoLanguageCode")
     } or None
 
     return {
         "book_id": book.get("legacyId"),
         "title": book.get("titleComplete") or book.get("title"),
         "author": author.get("name"),
+        "cover": book.get("imageUrl"),
         "description": _clean_text(book.get("description")),
         "average_rating": stats.get("averageRating"),
         "ratings_count": stats.get("ratingsCount"),
@@ -400,10 +505,12 @@ def get_book(book_id: str) -> dict[str, Any]:
         "review_languages": review_languages,
         "series": series,
         "series_position": series_position,
+        "series_memberships": series_memberships,
         "pages": details.get("numPages"),
         "format": details.get("format"),
         "publisher": details.get("publisher"),
         "publication_time": details.get("publicationTime"),
+        "publication_date": _ms_to_iso(details.get("publicationTime")),
         "isbn13": details.get("isbn13"),
         "genres": [g for g in genres if g],
         "url": book.get("webUrl"),
@@ -501,15 +608,22 @@ def similar_books(book_id: str, limit: int = 10) -> dict[str, Any]:
 
     Goodreads' own recommendation graph (hard to reproduce with web search).
     Each result has book_id/title/author/rating/url so you can chain into
-    get_book or get_reviews. limit capped at 40.
+    get_book or get_reviews. Results paginate in batches and limit is capped
+    at 100.
     """
+    _validate_discovery_limit(limit)
     ids = _resolve_book_ids(book_id)
-    data = gr.graphql(
-        _Q_SIMILAR, {"id": ids["book_kca"], "limit": min(limit, _MAX_DISCOVERY)}
+    edges, has_more, _ = _paginated_graphql_edges(
+        _Q_SIMILAR, "getSimilarBooks", {"id": ids["book_kca"]}, limit
     )
-    edges = ((data.get("getSimilarBooks") or {}).get("edges")) or []
     books = [_book_summary(e.get("node") or {}) for e in edges]
-    return {"book_id": ids["legacy_id"], "title": ids["title"], "similar": books}
+    return {
+        "book_id": ids["legacy_id"],
+        "title": ids["title"],
+        "returned": len(books),
+        "has_more": has_more,
+        "similar": books,
+    }
 
 
 @mcp.tool()
@@ -517,56 +631,74 @@ def author_books(book_id: str, limit: int = 20) -> dict[str, Any]:
     """List an author's works (bibliography), given any of their books.
 
     Resolves the book's primary author, then returns their works ranked by
-    popularity. Each result has book_id/title/author/rating/url. limit
-    capped at 40.
+    popularity. Each result has book_id/title/author/rating/url. Results
+    paginate in batches and limit is capped at 100.
     """
+    _validate_discovery_limit(limit)
     ids = _resolve_book_ids(book_id)
     if not ids["contributor_kca"]:
         raise ValueError(f"Could not resolve an author for book {book_id!r}.")
-    data = gr.graphql(
+    edges, has_more, total_count = _paginated_graphql_edges(
         _Q_AUTHOR,
+        "getWorksByContributor",
         {
             "input": {"id": ids["contributor_kca"]},
-            "pagination": {"limit": min(limit, _MAX_DISCOVERY)},
         },
+        limit,
     )
-    conn = data.get("getWorksByContributor") or {}
-    works = [_work_summary(e.get("node") or {}) for e in (conn.get("edges") or [])]
+    works = [_work_summary(e.get("node") or {}) for e in edges]
     return {
         "author": ids["contributor_name"],
         "author_url": ids["contributor_url"],
-        "total_works": conn.get("totalCount"),
+        "total_works": total_count,
         "returned": len(works),
+        "has_more": has_more,
         "works": works,
     }
 
 
 @mcp.tool()
-def series_books(book_id: str, limit: int = 20) -> dict[str, Any]:
+def series_books(
+    book_id: str, limit: int = 20, series_index: int = 0
+) -> dict[str, Any]:
     """List the books in a series (with reading-order placement), given any
-    book in that series.
+    book in that series. When a book belongs to multiple series, pass the
+    zero-based series_index from get_book's series_memberships order.
 
     Each entry has the series 'placement' (e.g. '1', '0.5' for a prequel),
     'is_primary' (a main-sequence entry vs companion), and the usual
-    book_id/title/author/rating/url. limit capped at 40.
+    book_id/title/author/rating/url. Results paginate in batches and limit is
+    capped at 100.
     """
+    _validate_discovery_limit(limit)
+    if series_index < 0:
+        raise ValueError("series_index must be zero or greater.")
     ids = _resolve_book_ids(book_id)
-    if not ids["series_kca"]:
+    memberships = ids["series_memberships"]
+    if not memberships:
         return {
             "book_id": ids["legacy_id"],
             "title": ids["title"],
             "series": None,
             "note": "This book isn't part of a Goodreads series.",
+            "returned": 0,
+            "has_more": False,
             "books": [],
         }
-    data = gr.graphql(
+    if series_index >= len(memberships):
+        raise ValueError(
+            f"series_index {series_index} is out of range; this book has "
+            f"{len(memberships)} series membership(s)."
+        )
+    selected_series = memberships[series_index]
+    edges, has_more, _ = _paginated_graphql_edges(
         _Q_SERIES,
+        "getWorksForSeries",
         {
-            "input": {"id": ids["series_kca"]},
-            "pagination": {"limit": min(limit, _MAX_DISCOVERY)},
+            "input": {"id": selected_series["id"]},
         },
+        limit,
     )
-    edges = ((data.get("getWorksForSeries") or {}).get("edges")) or []
     books = []
     for e in edges:
         summary = _work_summary(e.get("node") or {})
@@ -574,8 +706,10 @@ def series_books(book_id: str, limit: int = 20) -> dict[str, Any]:
         summary["is_primary"] = e.get("isPrimary")
         books.append(summary)
     return {
-        "series": ids["series_title"],
+        "series": selected_series["title"],
+        "series_index": series_index,
         "returned": len(books),
+        "has_more": has_more,
         "books": books,
     }
 
@@ -584,21 +718,23 @@ def series_books(book_id: str, limit: int = 20) -> dict[str, Any]:
 def get_editions(book_id: str, limit: int = 20) -> dict[str, Any]:
     """List published editions of a book (formats, ISBNs, publishers, dates).
 
-    Useful for "which edition / format / ISBN" questions. limit capped at 40.
+    Useful for "which edition / format / ISBN" questions. Results paginate in
+    batches and limit is capped at 100.
     """
+    _validate_discovery_limit(limit)
     ids = _resolve_book_ids(book_id)
-    data = gr.graphql(
-        _Q_EDITIONS, {"id": ids["work_kca"], "limit": min(limit, _MAX_DISCOVERY)}
+    edges, has_more, total_count = _paginated_graphql_edges(
+        _Q_EDITIONS, "getEditions", {"id": ids["work_kca"]}, limit
     )
-    conn = data.get("getEditions") or {}
     editions = []
-    for e in conn.get("edges") or []:
+    for e in edges:
         node = e.get("node") or {}
         details = node.get("details") or {}
         editions.append(
             {
                 "book_id": node.get("legacyId"),
                 "title": node.get("title"),
+                "cover": node.get("imageUrl"),
                 "format": details.get("format"),
                 "publisher": details.get("publisher"),
                 "publication_time": details.get("publicationTime"),
@@ -611,8 +747,9 @@ def get_editions(book_id: str, limit: int = 20) -> dict[str, Any]:
     return {
         "book_id": ids["legacy_id"],
         "title": ids["title"],
-        "total_editions": conn.get("totalCount"),
+        "total_editions": total_count,
         "returned": len(editions),
+        "has_more": has_more,
         "editions": editions,
     }
 
@@ -624,13 +761,13 @@ def book_lists(book_id: str, limit: int = 10) -> dict[str, Any]:
 
     Each list has its title, total member votes, how many books it contains,
     and a 'url'. Good for "what kind of book is this / what's it grouped with"
-    and for discovery. limit capped at 40.
+    and for discovery. Results paginate in batches and limit is capped at 100.
     """
+    _validate_discovery_limit(limit)
     ids = _resolve_book_ids(book_id)
-    data = gr.graphql(
-        _Q_BOOK_LISTS, {"id": ids["book_kca"], "limit": min(limit, _MAX_DISCOVERY)}
+    edges, has_more, _ = _paginated_graphql_edges(
+        _Q_BOOK_LISTS, "getBookListsOfBook", {"id": ids["book_kca"]}, limit
     )
-    edges = ((data.get("getBookListsOfBook") or {}).get("edges")) or []
     lists = [
         {
             "list_id": (n := e.get("node") or {}).get("legacyId"),
@@ -645,6 +782,7 @@ def book_lists(book_id: str, limit: int = 10) -> dict[str, Any]:
         "book_id": ids["legacy_id"],
         "title": ids["title"],
         "returned": len(lists),
+        "has_more": has_more,
         "lists": lists,
     }
 
