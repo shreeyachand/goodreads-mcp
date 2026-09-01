@@ -12,6 +12,8 @@ from goodreads_mcp.client import (
     WAFChallenge,
     _is_waf_challenge,
     parse_appsync_config,
+    parse_appsync_endpoint,
+    parse_page_api_key,
 )
 from goodreads_mcp.server import _clean_text, _legacy_id, _ms_to_iso
 
@@ -85,6 +87,140 @@ def test_parse_appsync_config_falls_back_to_first_pair():
 def test_parse_appsync_config_raises_when_absent():
     with pytest.raises(ValueError):
         parse_appsync_config("var x = 1; // no appsync here")
+
+
+def test_parse_appsync_endpoint_picks_prod_without_bundle_key():
+    bundle = BUNDLE.replace(
+        '"apiKey":"da2-devkey00000000000000000",', '"apiKey":"",'
+    ).replace(
+        '"apiKey":"da2-prodkey0000000000000000",', '"apiKey":"",'
+    )
+    assert parse_appsync_endpoint(bundle) == (
+        "https://prod.appsync-api.us-east-1.amazonaws.com/graphql"
+    )
+
+
+def _page(api_key: str | None) -> str:
+    page_props = {"dataSource": "Production"}
+    if api_key is not None:
+        page_props["apiKey"] = api_key
+    payload = {"props": {"pageProps": page_props}}
+    return (
+        '<script src="/_next/static/chunks/pages/_app-deadbeef.js"></script>'
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+
+def test_parse_page_api_key_reads_next_page_props():
+    assert parse_page_api_key(_page("da2-pagekey0000000000000000")) == (
+        "da2-pagekey0000000000000000"
+    )
+    assert parse_page_api_key(_page(None)) is None
+    assert parse_page_api_key(_page("not-an-appsync-key")) is None
+
+
+def test_graphql_config_combines_page_key_with_bundle_endpoint():
+    bundle = BUNDLE.replace(
+        '"apiKey":"da2-devkey00000000000000000",', '"apiKey":"",'
+    ).replace(
+        '"apiKey":"da2-prodkey0000000000000000",', '"apiKey":"",'
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            text=(
+                _page("da2-pagekey0000000000000000")
+                if request.url.path == "/giveaway"
+                else bundle
+            ),
+        )
+    )
+    client = GoodreadsClient()
+    client._client = httpx.Client(
+        base_url="https://www.goodreads.com", transport=transport
+    )
+
+    assert client.graphql_config() == (
+        "https://prod.appsync-api.us-east-1.amazonaws.com/graphql",
+        "da2-pagekey0000000000000000",
+    )
+
+
+def test_graphql_config_uses_legacy_bundle_if_page_key_is_invalid():
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            text=(
+                _page("not-an-appsync-key")
+                if request.url.path == "/giveaway"
+                else BUNDLE
+            ),
+        )
+    )
+    client = GoodreadsClient()
+    client._client = httpx.Client(
+        base_url="https://www.goodreads.com", transport=transport
+    )
+
+    assert client.graphql_config() == (
+        "https://prod.appsync-api.us-east-1.amazonaws.com/graphql",
+        "da2-prodkey0000000000000000",
+    )
+
+
+def test_graphql_config_does_not_hide_discovery_failure_with_stale_key():
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            text=(
+                _page(None)
+                if request.url.path == "/giveaway"
+                else "var config = {};"
+            ),
+        )
+    )
+    client = GoodreadsClient()
+    client._client = httpx.Client(
+        base_url="https://www.goodreads.com", transport=transport
+    )
+
+    with pytest.raises(ValueError, match="No AppSync"):
+        client.graphql_config()
+
+
+def test_graphql_401_rediscovers_page_key_before_retry():
+    bundle = BUNDLE.replace(
+        '"apiKey":"da2-devkey00000000000000000",', '"apiKey":"",'
+    ).replace(
+        '"apiKey":"da2-prodkey0000000000000000",', '"apiKey":"",'
+    )
+    page_keys = iter(
+        ("da2-expired000000000000000000", "da2-fresh00000000000000000000")
+    )
+    posted_keys = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/giveaway":
+            return httpx.Response(200, text=_page(next(page_keys)))
+        if request.url.path.startswith("/_next/"):
+            return httpx.Response(200, text=bundle)
+        posted_keys.append(request.headers["x-api-key"])
+        if request.headers["x-api-key"].startswith("da2-expired"):
+            return httpx.Response(401, json={"message": "Unauthorized"})
+        return httpx.Response(200, json={"data": {"ping": "pong"}})
+
+    client = GoodreadsClient()
+    client._client = httpx.Client(
+        base_url="https://www.goodreads.com", transport=httpx.MockTransport(handler)
+    )
+
+    assert client.graphql("query { ping }") == {"ping": "pong"}
+    assert posted_keys == [
+        "da2-expired000000000000000000",
+        "da2-fresh00000000000000000000",
+    ]
 
 
 # ------------------------------------------------------------------- shelf RSS

@@ -1,7 +1,7 @@
 """Goodreads HTTP client (read-only).
 
 Goodreads has had no public API since Dec 2020, so everything here rides
-on three unofficial-but-stable read surfaces, in order of robustness:
+on four unofficial-but-stable read surfaces, in order of robustness:
 
   1. Shelf RSS feeds   — /review/list_rss/{user_id}?shelf=... (public
                           shelves; structured XML)
@@ -9,6 +9,8 @@ on three unofficial-but-stable read surfaces, in order of robustness:
   3. Embedded page JSON — book/giveaway pages are Next.js; __NEXT_DATA__
                           carries the full Apollo state. Parse that, not
                           the DOM.
+  4. AppSync GraphQL     — page-level __NEXT_DATA__ carries the anonymous
+                          API key; the _app bundle carries the endpoint.
 
 No auth, no cookies, no writes — this server only reads public data.
 
@@ -49,20 +51,21 @@ NEXT_DATA_RE = re.compile(
 )
 
 # --- AppSync GraphQL (Goodreads' backend) --------------------------------
-# The web frontend ships a public, read-only API key in its JS bundle. We
-# resolve it (and the prod endpoint) from the bundle at runtime so a key
-# rotation self-heals; the hardcoded pair below is a last-resort fallback.
-GRAPHQL_FALLBACK_ENDPOINT = (
-    "https://kxbwmqov6jgg3daaamb744ycu4.appsync-api.us-east-1.amazonaws.com/graphql"
-)
-GRAPHQL_FALLBACK_KEY = "da2-xpgsdydkbregjhpr6ejzqdhuwy"
+# The web frontend injects its public, read-only API key into page-level
+# __NEXT_DATA__, while its _app bundle carries the environment endpoints.
+# Resolve both at runtime so key and endpoint rotations self-heal.
 
-# An id-free Next.js page whose _app bundle carries the AppSync config.
+# An id-free Next.js page carrying the anonymous key and _app bundle reference.
 CONFIG_DISCOVERY_PATH = "/giveaway"
 APP_CHUNK_RE = re.compile(r'src="(/_next/static/chunks/pages/_app-[0-9a-f]+\.js)"')
 # pattern in the bundle: "<api-key>","endpoint":"https://...appsync-api.../graphql"
 APPSYNC_PAIR_RE = re.compile(
     r'"(da2-[a-z0-9]+)","endpoint":'
+    r'"(https://[a-z0-9.\-]+\.appsync-api\.[a-z0-9.\-]+/graphql)"'
+)
+APPSYNC_KEY_RE = re.compile(r"da2-[a-z0-9]+")
+APPSYNC_ENDPOINT_RE = re.compile(
+    r'"endpoint":'
     r'"(https://[a-z0-9.\-]+\.appsync-api\.[a-z0-9.\-]+/graphql)"'
 )
 
@@ -110,6 +113,45 @@ def parse_appsync_config(bundle_js: str) -> tuple[str, str]:
     return pairs[0].group(2), pairs[0].group(1)
 
 
+def parse_appsync_endpoint(bundle_js: str) -> str:
+    """Extract the production AppSync endpoint from the _app JS bundle."""
+    endpoints = list(APPSYNC_ENDPOINT_RE.finditer(bundle_js))
+    if not endpoints:
+        raise ValueError("No AppSync endpoint found in bundle.")
+    for index, match in enumerate(endpoints):
+        next_start = (
+            endpoints[index + 1].start()
+            if index + 1 < len(endpoints)
+            else len(bundle_js)
+        )
+        if '"shortName":"Prod"' in bundle_js[match.end():next_start]:
+            return match.group(1)
+    if len(endpoints) == 1:
+        return endpoints[0].group(1)
+    raise ValueError("Could not identify the production AppSync endpoint.")
+
+
+def parse_page_api_key(html: str) -> str | None:
+    """Extract the anonymous AppSync key injected into page-level Next data."""
+    match = NEXT_DATA_RE.search(html)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    props = payload.get("props")
+    if not isinstance(props, dict):
+        return None
+    page_props = props.get("pageProps")
+    if not isinstance(page_props, dict):
+        return None
+    key = page_props.get("apiKey")
+    return key if isinstance(key, str) and APPSYNC_KEY_RE.fullmatch(key) else None
+
+
 @dataclass
 class GoodreadsClient:
     max_retries: int = 3
@@ -154,21 +196,24 @@ class GoodreadsClient:
     def graphql_config(self, force: bool = False) -> tuple[str, str]:
         """Resolve (endpoint, api_key) for the AppSync GraphQL backend.
 
-        Scrapes the prod key/endpoint from the web app's _app JS bundle so a
-        key rotation self-heals; cached per process. Falls back to a known
-        hardcoded pair if discovery fails.
+        Reads the anonymous key from page-level Next data and the production
+        endpoint from the page's _app JS bundle, then caches them per process.
+        Legacy bundles that contain a paired key and endpoint remain supported.
         """
         if self._graphql_config and not force:
             return self._graphql_config
+        page = self.get(CONFIG_DISCOVERY_PATH).text
+        app_chunk = APP_CHUNK_RE.search(page)
+        if not app_chunk:
+            raise ValueError("Could not locate _app JS bundle for config.")
+        bundle = self.get(app_chunk.group(1)).text
+        page_key = parse_page_api_key(page)
         try:
-            page = self.get(CONFIG_DISCOVERY_PATH).text
-            m = APP_CHUNK_RE.search(page)
-            if not m:
-                raise ValueError("Could not locate _app JS bundle for config.")
-            bundle = self.get(m.group(1)).text
+            if page_key is None:
+                raise ValueError("No page-provided AppSync key.")
+            self._graphql_config = (parse_appsync_endpoint(bundle), page_key)
+        except ValueError:
             self._graphql_config = parse_appsync_config(bundle)
-        except Exception:  # noqa: BLE001 — any failure -> use the fallback pair
-            self._graphql_config = (GRAPHQL_FALLBACK_ENDPOINT, GRAPHQL_FALLBACK_KEY)
         return self._graphql_config
 
     def _graphql_post(
