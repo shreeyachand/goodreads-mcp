@@ -58,6 +58,12 @@ def test_get_book_series_position_live():
     book = server.get_book("2767052")  # The Hunger Games, book 1
     assert book["series"]
     assert book["series_position"] == "1"
+    assert book["series_memberships"][0] == {
+        "series": "The Hunger Games",
+        "position": "1",
+    }
+    assert book["cover"].startswith("https://")
+    assert book["publication_date"]
 
 
 def test_graphql_config_resolves_live():
@@ -113,6 +119,7 @@ def test_similar_books_live():
     assert len(res["similar"]) == 5
     b = res["similar"][0]
     assert b["book_id"] and b["title"] and b["author"]
+    assert b["cover"].startswith("https://")
     assert b["url"].startswith("https://www.goodreads.com/book/show/")
 
 
@@ -147,6 +154,13 @@ def test_get_editions_live():
     e = res["editions"][0]
     assert e["format"]
     assert e["url"].startswith("https://www.goodreads.com/book/show/")
+
+
+def test_get_editions_paginates_past_30_live():
+    res = server.get_editions("2767052", limit=35)
+    assert res["returned"] == 35
+    assert res["total_editions"] >= 35
+    assert all(e["book_id"] and e["url"] for e in res["editions"])
 
 
 def test_book_lists_live():
