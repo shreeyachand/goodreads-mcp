@@ -1,5 +1,6 @@
 .pytest_cache/
-.venv/
-.venv310/
+.venv*/
 __pycache__/
 .DS_Store
+vendor/
+*.mcpb

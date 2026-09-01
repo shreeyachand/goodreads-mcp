@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "goodreads-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for Goodreads (no API required): search, books, shelves, ratings",
+  "display_name": "Goodreads MCP",
+  "long_description": "Read-only MCP server for Goodreads — search books, fetch details/ratings histogram/series/review languages, paginated reviews via GraphQL, similar books, author bibliography, series order, editions, Listopia lists, popular by date, shelf RSS. No API key or login required; public data only.",
+  "author": {
+    "name": "Shreeya Chand",
+    "url": "https://github.com/shreeyachand"
+  },
+  "homepage": "https://github.com/shreeyachand/goodreads-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shreeyachand/goodreads-mcp"
+  },
+  "license": "MIT",
+  "keywords": ["goodreads", "books", "mcp", "reading"],
+  "server": {
+    "type": "python",
+    "entry_point": "goodreads_mcp/server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/goodreads_mcp/server.py"],
+      "env": {
+        "GOODREADS_USER_ID": "${user_config.goodreads_user_id}",
+        "PYTHONPATH": "${__dirname}/vendor"
+      }
+    }
+  },
+  "user_config": {
+    "goodreads_user_id": {
+      "type": "string",
+      "title": "Goodreads User ID",
+      "description": "Numeric Goodreads profile ID (the number in goodreads.com/user/show/<ID>-name). Used as the default for shelf tools. Optional — can also be passed per tool call.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

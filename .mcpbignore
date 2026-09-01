@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+.venv
+.venv310
+.venv*/
+venv
+.DS_Store
+*.mcpb
