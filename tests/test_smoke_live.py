@@ -61,9 +61,15 @@ def test_get_book_series_position_live():
 
 
 def test_graphql_config_resolves_live():
-    endpoint, key = GoodreadsClient().graphql_config(force=True)
+    client = GoodreadsClient()
+    endpoint, key = client.graphql_config(force=True)
     assert "appsync-api" in endpoint and endpoint.endswith("/graphql")
     assert key.startswith("da2-")
+    data = client.graphql(
+        "query($id: Int!){ getBookByLegacyId(legacyId:$id){ legacyId } }",
+        {"id": 54493401},
+    )
+    assert data["getBookByLegacyId"]["legacyId"] == 54493401
 
 
 def test_get_reviews_live():

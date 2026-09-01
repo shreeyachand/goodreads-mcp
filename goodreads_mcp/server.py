@@ -20,7 +20,8 @@ get_book routes around it via the .xml path. The client raises WAFChallenge
 if it ever gets a challenge body so failures are obvious, not silent.
 
 get_reviews uses Goodreads' AppSync GraphQL endpoint; the client resolves the
-public api key from the web bundle at runtime (see client.graphql_config).
+public API key from page-level Next data and the endpoint from the web bundle
+at runtime (see client.graphql_config).
 """
 
 from __future__ import annotations
