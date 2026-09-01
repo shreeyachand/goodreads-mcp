@@ -50,7 +50,7 @@ jobs:
         id: check_tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+          if git show-ref --tags --verify --quiet "refs/tags/$TAG"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Tag $TAG already exists — skipping release (bump version to release again)."
           else

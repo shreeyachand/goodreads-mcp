@@ -22,10 +22,10 @@
     "entry_point": "goodreads_mcp/server.py",
     "mcp_config": {
       "command": "python",
-      "args": ["${__dirname}/goodreads_mcp/server.py"],
+      "args": ["-m", "goodreads_mcp.server"],
       "env": {
         "GOODREADS_USER_ID": "${user_config.goodreads_user_id}",
-        "PYTHONPATH": "${__dirname}/vendor"
+        "PYTHONPATH": "${__dirname}:${__dirname}/vendor"
       }
     }
   },
