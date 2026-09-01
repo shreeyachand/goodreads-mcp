@@ -1,0 +1,100 @@
+name: Release MCPB
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" 2>/dev/null || python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "Version: $VER"
+
+      - name: Read version from manifest.json
+        run: |
+          MVER=$(python -c "import json; print(json.load(open('manifest.json'))['version'])")
+          PVER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" 2>/dev/null || python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$MVER" != "$PVER" ]; then
+            echo "::error::manifest.json version ($MVER) != pyproject.toml version ($PVER). Keep them in sync."
+            exit 1
+          fi
+
+      - name: Check if tag already exists (skip if version not bumped)
+        id: check_tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git show-ref --tags --verify --quiet "refs/tags/$TAG"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists — skipping release (bump version to release again)."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Also check remote
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "remote_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "remote_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install test deps and run tests
+        if: steps.check_tag.outputs.exists == 'false' && steps.check_tag.outputs.remote_exists == 'false'
+        run: |
+          pip install -e ".[test]"
+          pytest -q
+
+      - name: Vendor Python dependencies
+        if: steps.check_tag.outputs.exists == 'false' && steps.check_tag.outputs.remote_exists == 'false'
+        run: |
+          # Bundle deps so the .mcpb runs without host pip installs.
+          # We vendor only the runtime deps; the project itself is already in the bundle.
+          pip install --target ./vendor "mcp[cli]>=1.0,<2" "httpx>=0.27"
+          ls -la vendor/ | head -20
+          echo "vendored $(ls vendor | wc -l) top-level packages"
+
+      - name: Pack MCPB
+        if: steps.check_tag.outputs.exists == 'false' && steps.check_tag.outputs.remote_exists == 'false'
+        run: |
+          npx -y @anthropic-ai/mcpb pack
+          ls -lh *.mcpb 2>/dev/null || ls -lh ./*.mcpb 2>/dev/null || find . -maxdepth 2 -name "*.mcpb" -ls
+
+      - name: Create GitHub Release and upload .mcpb
+        if: steps.check_tag.outputs.exists == 'false' && steps.check_tag.outputs.remote_exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: "*.mcpb"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clean up vendor (avoid committing)
+        if: always()
+        run: rm -rf vendor/ *.mcpb
