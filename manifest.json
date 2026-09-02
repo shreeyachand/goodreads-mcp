@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
   "manifest_version": "0.4",
   "name": "goodreads-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only MCP server for Goodreads (no API required): search, books, shelves, ratings",
   "display_name": "Goodreads MCP",
   "long_description": "Read-only MCP server for Goodreads — search books, fetch details/ratings histogram/series/review languages, paginated reviews via GraphQL, similar books, author bibliography, series order, editions, Listopia lists, popular by date, shelf RSS. No API key or login required; public data only.",
