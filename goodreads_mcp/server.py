@@ -35,6 +35,7 @@ from urllib.parse import unquote
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from .cache import ttl_cache
 from .client import BASE, GoodreadsClient
 from .config import load_user_id
 
@@ -68,6 +69,12 @@ mcp = FastMCP("goodreads", instructions=SERVER_INSTRUCTIONS)
 gr = GoodreadsClient()
 DEFAULT_USER_ID = load_user_id()
 
+# Cache only stable, read-only lookup results. Five minutes is long enough to
+# collapse repeated tool chains without making changing Goodreads stats feel
+# stale for the lifetime of an MCP session.
+_CACHE_TTL_SECONDS = 300
+_BOOK_CACHE_SIZE = 128
+
 
 def _user_id(user_id: str | None) -> str:
     uid = user_id or DEFAULT_USER_ID
@@ -95,6 +102,7 @@ def _ms_to_iso(ms: Any) -> str | None:
         return None
 
 
+@ttl_cache(maxsize=_BOOK_CACHE_SIZE, ttl_seconds=_CACHE_TTL_SECONDS)
 def _fetch_book_apollo(book_id: str) -> dict[str, Any]:
     """Fetch a book page and return its Apollo state.
 
@@ -247,6 +255,7 @@ _POPULAR_PAGE_SIZE = 30
 _MAX_COMPARE = 10
 
 
+@ttl_cache(maxsize=_BOOK_CACHE_SIZE, ttl_seconds=_CACHE_TTL_SECONDS)
 def _resolve_book_ids(book_id: str) -> dict[str, Any]:
     """Resolve a book_id to its kca ids (book/work/contributor/series) plus
     legacyId and title, via one getBookByLegacyId call."""

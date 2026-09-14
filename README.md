@@ -89,14 +89,15 @@ GOODREADS_LIVE=1 .venv/bin/pytest      # + live network smoke tests
 - **GraphQL backbone (reviews).** `get_reviews` calls Goodreads' AppSync GraphQL endpoint — the same backend the website uses. The web app injects a public read-only API key into page-level `__NEXT_DATA__` and keeps the production endpoint in its `_app` bundle; the client resolves both at runtime and caches them, so rotations self-heal (`client.graphql_config`). Legacy bundles that carry a paired key and endpoint are still supported. This is what enables real pagination (past the ~30 reviews a page embeds) and server-side rating filters. GraphQL partial-success is respected: a deleted review's sub-resource just comes back `null` rather than failing the call.
 - **WAF-aware.** Book pages sit behind an AWS WAF JS challenge; `get_book` uses the `.xml` path that isn't gated, and the client raises `WAFChallenge` if it ever gets a challenge body so failures are loud, not silent. (The GraphQL endpoint is a separate AppSync host and isn't WAF-gated.)
 - **Polite client.** Single persistent session, browser-faithful headers, exponential backoff on 429/503; `get_reviews` caps paging at 100 reviews.
+- **Short-lived caching.** Book-page data and GraphQL identifier resolution use a bounded five-minute TTL cache. Chained tools and comparisons avoid immediately refetching the same public data while still refreshing changing Goodreads stats.
 - **Caveats**: all of this is unofficial and depends on markup/endpoints/keys that can drift.
 
 ## shipped since v0.1
 
 - **richer book data** — `get_book` now includes the ratings histogram, series/position, and review-language breakdown; `series_books` and `similar_books` cover series and recommendations; `get_reviews` returns paginated, filterable reader reviews.
 - **author bibliography** — `author_books` returns an author's works (ranked by popularity) plus a link to their author page (`author_url`).
+- **TTL caching** — repeated book-page and identifier lookups are reused for five minutes.
 
 ## ideas for v2
 
 - author page detail (bio, photo, follower count) — not currently exposed cleanly: the author page is legacy server-rendered HTML with no structured JSON, and there's no discoverable GraphQL contributor-detail query, so this would require brittle DOM scraping. `author_books` links to the page instead.
-- caching layer for repeated lookups (the discovery tools each resolve the book first; a small TTL cache would cut duplicate GraphQL calls)
