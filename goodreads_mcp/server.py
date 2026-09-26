@@ -281,9 +281,10 @@ def _paginated_graphql_edges(
     seen_tokens: set[str] = set()
 
     while len(collected) < want:
-        pagination: dict[str, Any] = {
-            "limit": min(_DISCOVERY_PAGE_SIZE, want - len(collected))
-        }
+        # Goodreads' cursor is a page number and the server derives the
+        # offset from the limit sent with each request, so the page size
+        # must stay constant across the walk. Overshoot is trimmed below.
+        pagination: dict[str, Any] = {"limit": _DISCOVERY_PAGE_SIZE}
         if token:
             pagination["after"] = token
         page_variables = {**variables, "pagination": pagination}
