@@ -1,7 +1,7 @@
 """Goodreads HTTP client (read-only).
 
 Goodreads has had no public API since Dec 2020, so everything here rides
-on four unofficial-but-stable read surfaces, in order of robustness:
+on five unofficial-but-stable read surfaces, in order of robustness:
 
   1. Shelf RSS feeds   — /review/list_rss/{user_id}?shelf=... (public
                           shelves; structured XML)
@@ -11,6 +11,9 @@ on four unofficial-but-stable read surfaces, in order of robustness:
                           the DOM.
   4. AppSync GraphQL     — page-level __NEXT_DATA__ carries the anonymous
                           API key; the _app bundle carries the endpoint.
+  5. Scraped HTML        — list_shelves only, and explicitly best-effort:
+                          shelf *names* have no structured surface. Don't
+                          extend this to anything a surface above covers.
 
 No auth, no cookies, no writes — this server only reads public data.
 
@@ -20,6 +23,8 @@ House rules (these endpoints are unofficial; be a polite guest):
   * browser-faithful headers
   * detect AWS WAF JS challenges and fail loudly instead of feeding the
     challenge page to a parser
+  * detect a redirect to the sign-in page and fail loudly instead of
+    parsing the login form as if it were the page that was asked for
 """
 
 from __future__ import annotations
@@ -91,6 +96,25 @@ def _is_waf_challenge(resp: httpx.Response) -> bool:
         return False
     head = resp.text[:2048]
     return any(marker in head for marker in WAF_MARKERS)
+
+
+class LoginRequired(Exception):
+    """Raised when Goodreads answers with its sign-in page instead of content.
+
+    A login-gated path comes back as a 302 to `/user/sign_in`, which the
+    client follows to a 200 login form. Status alone looks like success, so
+    without this check a scraper reads the form, finds nothing, and reports
+    an empty result as if the data did not exist. This server is
+    unauthenticated by design, so there is no retry-with-credentials: the
+    only fix is a different, still-public surface.
+    """
+
+
+SIGN_IN_PATH = "/user/sign_in"
+
+
+def _is_sign_in_page(resp: httpx.Response) -> bool:
+    return resp.url.path == SIGN_IN_PATH
 
 
 class GraphQLError(Exception):
@@ -182,6 +206,12 @@ class GoodreadsClient:
                         "(HTTP 202). This path can't be fetched without a real "
                         "browser; try an alternate endpoint (e.g. the .xml book "
                         "page, RSS feed, or JSON autocomplete)."
+                    )
+                if _is_sign_in_page(resp):
+                    raise LoginRequired(
+                        f"Goodreads redirected {url!r} to its sign-in page. "
+                        "This path now needs a login, which this read-only "
+                        "server does not do; try an alternate public endpoint."
                     )
                 return resp
             time.sleep(delay + random.uniform(0, 0.5))

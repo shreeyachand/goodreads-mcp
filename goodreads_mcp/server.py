@@ -13,11 +13,13 @@ Tools (all public data, no auth):
     popular_books       most popular books by release year/month (GraphQL)
     compare_books       rank several books by rating + polarization
     get_shelf           shelf RSS feed
-    list_shelves        scraped from the review list page (best effort)
+    list_shelves        scraped from the public profile page (best effort)
 
 NOTE: book HTML pages now sit behind an AWS WAF JS challenge (HTTP 202).
 get_book routes around it via the .xml path. The client raises WAFChallenge
-if it ever gets a challenge body so failures are obvious, not silent.
+if it ever gets a challenge body so failures are obvious, not silent. The
+review-list page (/review/list/{uid}) went login-only in Sep 2026; the
+client raises LoginRequired on a sign-in redirect for the same reason.
 
 get_reviews uses Goodreads' AppSync GraphQL endpoint; the client resolves the
 public API key from page-level Next data and the endpoint from the web bundle
@@ -35,7 +37,7 @@ from urllib.parse import unquote
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from .client import BASE, GoodreadsClient
+from .client import BASE, GoodreadsClient, LoginRequired
 from .config import load_user_id
 
 _READ_ONLY = ToolAnnotations(
@@ -916,13 +918,31 @@ def get_shelf(
     return gr.parse_shelf_rss(resp.text)
 
 
+# A private profile is served as a normal 200 page with this box in place of
+# the bookshelves module, so it has to be told apart from "no shelf links".
+_PRIVATE_PROFILE_MARKER = 'id="privateProfile"'
+
+
 @mcp.tool(annotations=_READ_ONLY)
 def list_shelves(user_id: str | None = None) -> list[str]:
-    """List a user's shelf names (scraped from their review-list page; best
-    effort). Defaults to the configured user."""
+    """List a user's shelf names (scraped from their public profile page;
+    best effort). Defaults to the configured user.
+
+    Covers the exclusive shelves (read, to-read, ...) and custom shelves;
+    every name works as get_shelf's 'shelf' argument. Raises LoginRequired
+    for a private profile. The profile page may cap a very long shelf list.
+    """
     uid = _user_id(user_id)
-    page = gr.get(f"/review/list/{uid}").text
-    names = re.findall(r'[?&]shelf=([A-Za-z0-9_%\-]+)', page)
+    # Not /review/list/{uid}: that page redirects to sign-in since Sep 2026.
+    # The profile's bookshelves module links the exclusive shelves as
+    # ?shelf= and custom shelves as ?tag=; both feed /review/list_rss as shelf=.
+    page = gr.get(f"/user/show/{uid}").text
+    if _PRIVATE_PROFILE_MARKER in page:
+        raise LoginRequired(
+            f"Goodreads profile {uid!r} is private: its shelves are shown only "
+            "to signed-in friends, which this read-only server does not do."
+        )
+    names = re.findall(r'[?&](?:shelf|tag)=([A-Za-z0-9_%\-]+)', page)
     seen: dict[str, None] = {}
     for n in names:
         seen.setdefault(unquote(html_mod.unescape(n)), None)
