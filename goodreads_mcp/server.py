@@ -410,10 +410,17 @@ def search_books(query: str, max_results: int = 10) -> list[dict[str, Any]]:
 
     Uses the JSON autocomplete endpoint (no auth, no HTML parsing).
     Returns book_id, title, author, rating info, and a cover URL.
+
+    max_results: how many to return. The autocomplete endpoint itself
+        answers with at most ~5 matches, so a larger value returns what
+        Goodreads sent, not more.
     """
+    if max_results < 0:
+        raise ValueError("max_results must be zero or greater.")
     resp = gr.get("/book/auto_complete", params={"format": "json", "q": query})
     results = []
     for b in resp.json()[:max_results]:
+        book_url = b.get("bookUrl")
         results.append(
             {
                 "book_id": b.get("bookId"),
@@ -423,7 +430,8 @@ def search_books(query: str, max_results: int = 10) -> list[dict[str, Any]]:
                 "ratings_count": b.get("ratingsCount"),
                 "pages": b.get("numPages"),
                 "cover": b.get("imageUrl"),
-                "url": BASE + (b.get("bookUrl") or ""),
+                # Null is explicit: BASE alone would be a link to the home page.
+                "url": BASE + book_url if book_url else None,
                 "description": html_mod.unescape(
                     re.sub(r"<[^>]+>", "", (b.get("description") or {}).get("html", ""))
                 )[:400],
@@ -534,10 +542,17 @@ def get_reviews(
     profile url.
 
     limit: max reviews to return (capped at 100 to stay polite).
-    min_rating / max_rating: server-side star filters, e.g. min_rating=4 for
-        positive reviews, max_rating=2 for the critical ones.
+    min_rating / max_rating: server-side star filters, each 1-5, e.g.
+        min_rating=4 for positive reviews, max_rating=2 for the critical ones.
     exclude_spoilers: drop reviews flagged as spoilers.
     """
+    # Goodreads answers an impossible star filter with an empty page, which
+    # would read as "this book has no reviews"; refuse it here instead.
+    for name, value in (("min_rating", min_rating), ("max_rating", max_rating)):
+        if value is not None and not 1 <= value <= 5:
+            raise ValueError(f"{name} must be between 1 and 5.")
+    if min_rating is not None and max_rating is not None and min_rating > max_rating:
+        raise ValueError("min_rating must not be greater than max_rating.")
     want = max(0, min(limit, _MAX_REVIEWS))
     book = gr.graphql(_Q_BOOK_BY_LEGACY, {"id": _legacy_id(book_id)}).get(
         "getBookByLegacyId"
@@ -856,13 +871,19 @@ def compare_books(book_ids: list[str]) -> dict[str, Any]:
     Fetches each book and returns them ranked best-to-worst by average rating,
     with the ratings_histogram plus 'pct_positive' (share of 4-5 star) and
     'pct_critical' (share of 1-2 star) so you can judge not just the average
-    but how divisive each book is. Pass 2-10 book ids (from search_books etc.).
+    but how divisive each book is. Pass 2-10 book ids (from search_books etc.);
+    more than 10 is refused rather than silently trimmed, so split the call.
     """
     if not book_ids:
         raise ValueError("Provide at least one book_id to compare.")
+    if len(book_ids) > _MAX_COMPARE:
+        raise ValueError(
+            f"compare_books takes at most {_MAX_COMPARE} book ids; "
+            f"got {len(book_ids)}. Split them across calls."
+        )
 
     results: list[dict[str, Any]] = []
-    for bid in book_ids[:_MAX_COMPARE]:
+    for bid in book_ids:
         try:
             b = get_book(bid)
         except Exception as e:  # noqa: BLE001 — report per-book, don't abort all
@@ -908,11 +929,13 @@ def get_shelf(
     """List books on a shelf via its RSS feed (public shelves; no auth).
 
     Common shelves: 'read', 'currently-reading', 'to-read', plus any custom
-    shelf name. RSS pages hold ~100 items; pass page=2,3,... for more.
-    Defaults to the configured GOODREADS_USER_ID.
+    shelf name. RSS pages hold ~100 items; pass page=2,3,... for more
+    (pages start at 1). Defaults to the configured GOODREADS_USER_ID.
 
     When you cite a book from a shelf, link it to its 'link' field.
     """
+    if page < 1:
+        raise ValueError("page must be 1 or greater.")
     uid = _user_id(user_id)
     resp = gr.get(f"/review/list_rss/{uid}", params={"shelf": shelf, "page": page})
     return gr.parse_shelf_rss(resp.text)
