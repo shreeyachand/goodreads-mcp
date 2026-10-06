@@ -20,6 +20,9 @@ No auth, no cookies, no writes — this server only reads public data.
 House rules (these endpoints are unofficial; be a polite guest):
   * single client, persistent session
   * exponential backoff on 429/503
+  * at most MAX_IN_FLIGHT requests on the wire at once: tool calls run in
+    worker threads so the server stays responsive, and this cap is
+    what keeps that from turning into a burst of parallel requests
   * browser-faithful headers
   * detect AWS WAF JS challenges and fail loudly instead of feeding the
     challenge page to a parser
@@ -32,14 +35,22 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 BASE = "https://www.goodreads.com"
+
+# How many requests may be on the wire at once. Tool calls run in worker
+# threads (server.py), so a client that issues tool calls in parallel
+# would otherwise open one Goodreads request per call. Two is well inside what
+# a single browser tab does, keeps a pair of parallel calls from serializing,
+# and is small enough that a burst of calls queues here instead of at Goodreads.
+MAX_IN_FLIGHT = 2
 
 HEADERS = {
     "User-Agent": (
@@ -178,26 +189,39 @@ def parse_page_api_key(html: str) -> str | None:
 
 @dataclass
 class GoodreadsClient:
+    """One shared client per process. Safe to call from several threads at
+    once: `httpx.Client` is thread-safe, the lazily created state (the session
+    and the GraphQL config) is created under a lock so it is created once, and
+    `_in_flight` caps how many requests are on the wire at a time.
+    """
+
     max_retries: int = 3
     _client: httpx.Client | None = None
     _graphql_config: tuple[str, str] | None = None
+    _client_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _config_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _in_flight: threading.Semaphore = field(
+        default_factory=lambda: threading.BoundedSemaphore(MAX_IN_FLIGHT), repr=False
+    )
 
     @property
     def client(self) -> httpx.Client:
-        if self._client is None:
-            self._client = httpx.Client(
-                base_url=BASE,
-                headers=HEADERS,
-                follow_redirects=True,
-                timeout=30.0,
-            )
-        return self._client
+        with self._client_lock:
+            if self._client is None:
+                self._client = httpx.Client(
+                    base_url=BASE,
+                    headers=HEADERS,
+                    follow_redirects=True,
+                    timeout=30.0,
+                )
+            return self._client
 
     def _request(self, method: str, url: str, **kw) -> httpx.Response:
         """GET with backoff on 429/503."""
         delay = 1.0
         for attempt in range(self.max_retries + 1):
-            resp = self.client.request(method, url, **kw)
+            with self._in_flight:
+                resp = self.client.request(method, url, **kw)
             if resp.status_code not in (429, 503) or attempt == self.max_retries:
                 resp.raise_for_status()
                 if _is_waf_challenge(resp):
@@ -229,22 +253,29 @@ class GoodreadsClient:
         Reads the anonymous key from page-level Next data and the production
         endpoint from the page's _app JS bundle, then caches them per process.
         Legacy bundles that contain a paired key and endpoint remain supported.
+
+        Discovery runs under a lock: when several tool calls arrive together
+        on a fresh process, the first one discovers and the rest wait for its
+        answer instead of each fetching the page and bundle themselves.
         """
         if self._graphql_config and not force:
             return self._graphql_config
-        page = self.get(CONFIG_DISCOVERY_PATH).text
-        app_chunk = APP_CHUNK_RE.search(page)
-        if not app_chunk:
-            raise ValueError("Could not locate _app JS bundle for config.")
-        bundle = self.get(app_chunk.group(1)).text
-        page_key = parse_page_api_key(page)
-        try:
-            if page_key is None:
-                raise ValueError("No page-provided AppSync key.")
-            self._graphql_config = (parse_appsync_endpoint(bundle), page_key)
-        except ValueError:
-            self._graphql_config = parse_appsync_config(bundle)
-        return self._graphql_config
+        with self._config_lock:
+            if self._graphql_config and not force:
+                return self._graphql_config
+            page = self.get(CONFIG_DISCOVERY_PATH).text
+            app_chunk = APP_CHUNK_RE.search(page)
+            if not app_chunk:
+                raise ValueError("Could not locate _app JS bundle for config.")
+            bundle = self.get(app_chunk.group(1)).text
+            page_key = parse_page_api_key(page)
+            try:
+                if page_key is None:
+                    raise ValueError("No page-provided AppSync key.")
+                self._graphql_config = (parse_appsync_endpoint(bundle), page_key)
+            except ValueError:
+                self._graphql_config = parse_appsync_config(bundle)
+            return self._graphql_config
 
     def _graphql_post(
         self, endpoint: str, key: str, query: str, variables: dict[str, Any] | None

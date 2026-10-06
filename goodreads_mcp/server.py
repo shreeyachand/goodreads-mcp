@@ -24,16 +24,24 @@ client raises LoginRequired on a sign-in redirect for the same reason.
 get_reviews uses Goodreads' AppSync GraphQL endpoint; the client resolves the
 public API key from page-level Next data and the endpoint from the web bundle
 at runtime (see client.graphql_config).
+
+The tool bodies are plain `def`s that block on httpx. `OffLoopFastMCP` runs
+each call in a worker thread, so the event loop keeps answering pings while a
+request is in flight, and `client.MAX_IN_FLIGHT` caps how many of those
+requests overlap.
 """
 
 from __future__ import annotations
 
+import functools
 import html as html_mod
+import inspect
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 
+import anyio  # mcp's own async layer (it requires anyio>=4.5), not a new dependency
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -46,6 +54,43 @@ _READ_ONLY = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=True,
 )
+
+
+def _in_worker_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a blocking tool body in a coroutine that runs it off the loop.
+
+    `functools.wraps` carries the name, docstring and signature across, so
+    FastMCP builds the same tool schema it would from `fn` itself. A cancelled
+    request (the client sent notifications/cancelled, or went away) returns
+    at once; the thread finishes its Goodreads request on its own and the
+    result is dropped.
+    """
+
+    @functools.wraps(fn)
+    async def run_off_loop(*args: Any, **kwargs: Any) -> Any:
+        return await anyio.to_thread.run_sync(
+            functools.partial(fn, *args, **kwargs), abandon_on_cancel=True
+        )
+
+    return run_off_loop
+
+
+class OffLoopFastMCP(FastMCP):
+    """A FastMCP whose plain `def` tools run in a worker thread.
+
+    The MCP SDK calls a sync tool directly on the event loop, so while a tool
+    waited on Goodreads (30 s timeout, plus up to 7 s of 429/503 backoff) the
+    server could not answer a ping, act on a cancellation, or start another
+    tool call. Registering an async wrapper keeps the loop free. The
+    functions themselves stay sync, so `compare_books` can call `get_book`
+    and the offline tests call the bodies without an event loop.
+    """
+
+    def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        if not inspect.iscoroutinefunction(fn):
+            fn = _in_worker_thread(fn)
+        super().add_tool(fn, *args, **kwargs)
+
 
 SERVER_INSTRUCTIONS = """\
 This server returns public Goodreads data (books, reviews, shelves) for research.
@@ -66,7 +111,7 @@ Prefer markdown links. If a result's url field is null, say so rather than
 inventing a link.
 """
 
-mcp = FastMCP("goodreads", instructions=SERVER_INSTRUCTIONS)
+mcp = OffLoopFastMCP("goodreads", instructions=SERVER_INSTRUCTIONS)
 gr = GoodreadsClient()
 DEFAULT_USER_ID = load_user_id()
 
