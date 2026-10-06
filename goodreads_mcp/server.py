@@ -705,6 +705,8 @@ def series_books(
         summary["is_primary"] = e.get("isPrimary")
         books.append(summary)
     return {
+        "book_id": ids["legacy_id"],
+        "title": ids["title"],
         "series": selected_series["title"],
         "series_index": series_index,
         "returned": len(books),
@@ -816,6 +818,8 @@ def popular_books(
 
     entries: list[dict[str, Any]] = []
     token: str | None = None
+    has_more = False
+    seen_tokens: set[str] = set()
     while len(entries) < want:
         page = gr.graphql(
             _Q_TOP_LIST,
@@ -827,24 +831,31 @@ def popular_books(
                 "limit": _POPULAR_PAGE_SIZE,
             },
         ).get("getTopList") or {}
-        edges = page.get("edges") or []
-        for edge in edges:
-            if not edge or not edge.get("node"):
-                continue
+        edges = [e for e in (page.get("edges") or []) if e and e.get("node")]
+        remaining = want - len(entries)
+        for edge in edges[:remaining]:
             entry = {"rank": edge.get("rank"), "count": edge.get("count")}
             entry.update(_node_summary(edge["node"]))
             entries.append(entry)
-            if len(entries) >= want:
-                break
         info = page.get("pageInfo") or {}
         token = info.get("nextPageToken")
-        if not token or not edges or not info.get("hasNextPage"):
+        # Same rule as _paginated_graphql_edges: the chart continues if the
+        # page says so, or if we stopped at `want` with entries left unread.
+        has_more = bool(token and info.get("hasNextPage"))
+        if len(edges) > remaining:
+            has_more = True
+        if not edges or not has_more:
             break
+        # A server that hands back the same cursor must not loop forever.
+        if token in seen_tokens:
+            break
+        seen_tokens.add(token)
 
     return {
         "year": year,
         "month": month,
         "returned": len(entries),
+        "has_more": has_more,
         "books": entries,
     }
 
