@@ -34,8 +34,8 @@ def test_paginated_graphql_edges_follows_tokens(monkeypatch):
     )
 
     assert [edge["node"]["legacyId"] for edge in edges] == [1, 2, 3, 4]
-    assert calls[0]["pagination"] == {"limit": 4}
-    assert calls[1]["pagination"] == {"limit": 2, "after": "page-2"}
+    assert calls[0]["pagination"] == {"limit": 20}
+    assert calls[1]["pagination"] == {"limit": 20, "after": "page-2"}
     assert has_more is False
     assert total == 4
 
@@ -79,9 +79,52 @@ def test_paginated_graphql_edges_uses_bounded_page_sizes(monkeypatch):
     edges, has_more, _ = server._paginated_graphql_edges("query", "connection", {}, 35)
 
     assert len(edges) == 35
-    assert [call["pagination"]["limit"] for call in calls] == [20, 15]
+    assert [call["pagination"]["limit"] for call in calls] == [20, 20]
     assert calls[1]["pagination"]["after"] == "page-2"
-    assert has_more is False
+    # The second page overshoots the limit by five edges.
+    assert has_more is True
+
+
+@pytest.mark.parametrize("limit", [5, 20, 25, 39, 40, 41])
+def test_paginated_graphql_edges_walks_page_number_cursors(monkeypatch, limit):
+    """Model the real server: the cursor names a page number and the offset
+    is (page - 1) * limit, using the limit sent with that request. Any walk
+    that varies the page size returns duplicates and skips items."""
+    import base64
+    import json
+
+    ids = list(range(1000, 1060))
+
+    def token(page):
+        return base64.b64encode(json.dumps({"next_page": page}).encode()).decode()
+
+    def graphql(query, variables):
+        pagination = variables["pagination"]
+        page_size = pagination["limit"]
+        after = pagination.get("after")
+        page = json.loads(base64.b64decode(after))["next_page"] if after else 1
+        start = (page - 1) * page_size
+        chunk = ids[start : start + page_size]
+        more = start + page_size < len(ids)
+        return {
+            "connection": {
+                "totalCount": len(ids),
+                "edges": [{"node": {"legacyId": i}} for i in chunk],
+                "pageInfo": {
+                    "hasNextPage": more,
+                    "nextPageToken": token(page + 1) if more else None,
+                },
+            }
+        }
+
+    monkeypatch.setattr(server.gr, "graphql", graphql)
+    edges, has_more, total = server._paginated_graphql_edges(
+        "query", "connection", {}, limit
+    )
+
+    assert [edge["node"]["legacyId"] for edge in edges] == ids[:limit]
+    assert has_more is True
+    assert total == len(ids)
 
 
 def test_paginated_graphql_edges_rejects_negative_limit():
