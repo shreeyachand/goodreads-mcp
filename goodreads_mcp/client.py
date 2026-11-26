@@ -1,19 +1,20 @@
 """Goodreads HTTP client (read-only).
 
 Goodreads has had no public API since Dec 2020, so everything here rides
-on five unofficial-but-stable read surfaces, in order of robustness:
+on four unofficial-but-stable read surfaces, in order of robustness:
 
-  1. Shelf RSS feeds   — /review/list_rss/{user_id}?shelf=... (public
-                          shelves; structured XML)
-  2. Search autocomplete — /book/auto_complete?format=json&q=... (JSON)
-  3. Embedded page JSON — book/giveaway pages are Next.js; __NEXT_DATA__
+  1. Search autocomplete — /book/auto_complete?format=json&q=... (JSON)
+  2. Embedded page JSON — book/giveaway pages are Next.js; __NEXT_DATA__
                           carries the full Apollo state. Parse that, not
                           the DOM.
-  4. AppSync GraphQL     — page-level __NEXT_DATA__ carries the anonymous
+  3. AppSync GraphQL     — page-level __NEXT_DATA__ carries the anonymous
                           API key; the _app bundle carries the endpoint.
-  5. Scraped HTML        — list_shelves only, and explicitly best-effort:
+  4. Scraped HTML        — list_shelves only, and explicitly best-effort:
                           shelf *names* have no structured surface. Don't
                           extend this to anything a surface above covers.
+
+The legacy shelf RSS parser remains below for reference, but Goodreads
+retired RSS feeds in October 2026 and the corresponding tool is disabled.
 
 No auth, no cookies, no writes — this server only reads public data.
 
@@ -205,7 +206,7 @@ class GoodreadsClient:
                         f"Goodreads returned a WAF JS challenge for {url!r} "
                         "(HTTP 202). This path can't be fetched without a real "
                         "browser; try an alternate endpoint (e.g. the .xml book "
-                        "page, RSS feed, or JSON autocomplete)."
+                        "page or JSON autocomplete)."
                     )
                 if _is_sign_in_page(resp):
                     raise LoginRequired(

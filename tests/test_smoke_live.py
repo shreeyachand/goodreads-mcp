@@ -210,11 +210,3 @@ def test_compare_books_reports_bad_id_live():
     # the good one still ranks; the bad one is reported, not fatal
     assert any("error" in b for b in res["books"])
     assert any(b.get("title") == "Project Hail Mary" for b in res["books"])
-
-
-def test_get_shelf_rss_live():
-    # user 1 (Otis Chandler, GR founder) has a large public 'read' shelf
-    items = server.get_shelf("read", user_id="1", page=1)
-    assert items, "shelf RSS returned no items"
-    assert items[0]["title"]
-    assert items[0]["book_id"]

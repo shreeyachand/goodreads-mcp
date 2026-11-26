@@ -1,6 +1,6 @@
 # 📚 goodreads-mcp
 
-A **read-only** MCP server for Goodreads — built without the Goodreads API, because there hasn't been one since December 2020. Lets an LLM find and research books, ratings, and reviews. Tools ride on RSS feeds, the JSON autocomplete endpoint, and the `__NEXT_DATA__` blob embedded in book pages. No login, no cookies, no writes — public data only.
+A **read-only** MCP server for Goodreads — built without the Goodreads API, because there hasn't been one since December 2020. Lets an LLM find and research books, ratings, and reviews. Tools ride on the JSON autocomplete endpoint, embedded book JSON, GraphQL, and public profile HTML. No login, no cookies, no writes — public data only.
 
 ## tools
 
@@ -16,10 +16,13 @@ A **read-only** MCP server for Goodreads — built without the Goodreads API, be
 | `book_lists` | GraphQL — paginated Listopia lists a book appears on (title, votes, size) |
 | `popular_books` | GraphQL — most popular books by release year (or year+month), ranked |
 | `compare_books` | takes several book ids, ranks them by rating with positive/critical share |
-| `get_shelf` | stable (RSS) — public shelves |
 | `list_shelves` | best effort (HTML) — public profiles |
 
 The discovery tools all take a `book_id` and return results carrying `book_id`/title/author/rating/url, so an agent can chain them — e.g. `similar_books` → `get_reviews` on a recommendation. This is the structured book graph a general web search can't assemble.
+
+> **RSS note:** Goodreads retired RSS feeds in October 2026. `get_shelf` is
+> therefore kept internally for reference but disabled and no longer advertised
+> over MCP. `list_shelves` still works because it reads public profile HTML.
 
 GraphQL discovery tools page in batches of 20 and accept a total `limit` up to
 100. Responses include `returned` and `has_more`, keeping larger lookups useful
@@ -76,8 +79,7 @@ The endpoints are unofficial, so verify in this order:
 1. `search_books("project hail mary")` — should just work
 2. `get_book("54493401")` — confirms the `.xml`/WAF workaround; check the histogram is populated
 3. `get_reviews("54493401")` — should return real review text
-4. `get_shelf("to-read")` — checks your `user_id` + RSS
-5. `list_shelves()` — best-effort shelf-name scrape
+4. `list_shelves()` — best-effort public-profile shelf-name scrape
 
 ## tests
 
@@ -89,7 +91,7 @@ GOODREADS_LIVE=1 .venv/bin/pytest      # + live network smoke tests
 
 ## design notes
 
-- **Request-first, no browser automation.** Everything is `httpx` against JSON/RSS/embedded-JSON/GraphQL surfaces; the only HTML regex is in `list_shelves` and the GraphQL config discovery.
+- **Request-first, no browser automation.** Everything is `httpx` against JSON/embedded-JSON/GraphQL surfaces; the only HTML regex is in `list_shelves` and the GraphQL config discovery.
 - **GraphQL backbone (reviews).** `get_reviews` calls Goodreads' AppSync GraphQL endpoint — the same backend the website uses. The web app injects a public read-only API key into page-level `__NEXT_DATA__` and keeps the production endpoint in its `_app` bundle; the client resolves both at runtime and caches them, so rotations self-heal (`client.graphql_config`). Legacy bundles that carry a paired key and endpoint are still supported. This is what enables real pagination (past the ~30 reviews a page embeds) and server-side rating filters. GraphQL partial-success is respected: a deleted review's sub-resource just comes back `null` rather than failing the call.
 - **WAF-aware.** Book pages sit behind an AWS WAF JS challenge; `get_book` uses the `.xml` path that isn't gated, and the client raises `WAFChallenge` if it ever gets a challenge body so failures are loud, not silent. (The GraphQL endpoint is a separate AppSync host and isn't WAF-gated.)
 - **Polite client.** Single persistent session, browser-faithful headers, exponential backoff on 429/503; `get_reviews` caps paging at 100 reviews.

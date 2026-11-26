@@ -12,7 +12,6 @@ Tools (all public data, no auth):
     book_lists          Listopia lists a book appears on (GraphQL)
     popular_books       most popular books by release year/month (GraphQL)
     compare_books       rank several books by rating + polarization
-    get_shelf           shelf RSS feed
     list_shelves        scraped from the public profile page (best effort)
 
 NOTE: book HTML pages now sit behind an AWS WAF JS challenge (HTTP 202).
@@ -24,6 +23,9 @@ client raises LoginRequired on a sign-in redirect for the same reason.
 get_reviews uses Goodreads' AppSync GraphQL endpoint; the client resolves the
 public API key from page-level Next data and the endpoint from the web bundle
 at runtime (see client.graphql_config).
+
+Goodreads retired RSS feeds in October 2026. The legacy get_shelf function is
+kept for reference but unregistered below, so it is not exposed over MCP.
 """
 
 from __future__ import annotations
@@ -60,7 +62,6 @@ unsourced:
     'reviewer_url'). Note each review's star 'rating'.
   * Ratings/stats — when citing an average rating or the ratings_histogram,
     point to the book's 'url'.
-  * Shelves — link books to their 'link' field.
 
 Prefer markdown links. If a result's url field is null, say so rather than
 inventing a link.
@@ -926,7 +927,10 @@ def get_shelf(
     user_id: str | None = None,
     page: int = 1,
 ) -> list[dict[str, Any]]:
-    """List books on a shelf via its RSS feed (public shelves; no auth).
+    """List books on a shelf via its legacy RSS feed (public shelves; no auth).
+
+    Goodreads retired RSS feeds in October 2026. This implementation is kept
+    for reference but is not registered as an MCP tool.
 
     Common shelves: 'read', 'currently-reading', 'to-read', plus any custom
     shelf name. RSS pages hold ~100 items; pass page=2,3,... for more
@@ -951,14 +955,14 @@ def list_shelves(user_id: str | None = None) -> list[str]:
     """List a user's shelf names (scraped from their public profile page;
     best effort). Defaults to the configured user.
 
-    Covers the exclusive shelves (read, to-read, ...) and custom shelves;
-    every name works as get_shelf's 'shelf' argument. Raises LoginRequired
-    for a private profile. The profile page may cap a very long shelf list.
+    Covers the exclusive shelves (read, to-read, ...) and custom shelves.
+    Raises LoginRequired for a private profile. The profile page may cap a
+    very long shelf list.
     """
     uid = _user_id(user_id)
     # Not /review/list/{uid}: that page redirects to sign-in since Sep 2026.
     # The profile's bookshelves module links the exclusive shelves as
-    # ?shelf= and custom shelves as ?tag=; both feed /review/list_rss as shelf=.
+    # ?shelf= and custom shelves as ?tag=.
     page = gr.get(f"/user/show/{uid}").text
     if _PRIVATE_PROFILE_MARKER in page:
         raise LoginRequired(
@@ -970,6 +974,11 @@ def list_shelves(user_id: str | None = None) -> list[str]:
     for n in names:
         seen.setdefault(unquote(html_mod.unescape(n)), None)
     return list(seen)
+
+
+# Goodreads retired shelf RSS feeds in October 2026. Keep the implementation
+# for reference/re-enablement, but don't advertise a tool that can only 404.
+mcp.remove_tool("get_shelf")
 
 
 def main() -> None:
