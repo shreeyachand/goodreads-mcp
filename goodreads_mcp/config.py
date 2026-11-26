@@ -1,7 +1,7 @@
 """Configuration.
 
 This is a read-only server — no credentials, no cookies, no login. The only
-setting is your numeric Goodreads profile id, used by the RSS shelf tools
+setting is your numeric Goodreads profile id, used by the shelf tools
 (they're addressed by user id).
 
 GOODREADS_USER_ID (or "user_id" in the config file) is the number in

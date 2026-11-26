@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from goodreads_mcp import server
+
+
+def test_get_shelf_is_not_exposed_as_mcp_tool():
+    async def check():
+        tools = await server.mcp.list_tools()
+        assert "get_shelf" not in {tool.name for tool in tools}
+        with pytest.raises(ToolError, match="Unknown tool: get_shelf"):
+            await server.mcp.call_tool(
+                "get_shelf", {"shelf": "read", "user_id": "1"}
+            )
+
+    asyncio.run(check())
 
 
 def test_paginated_graphql_edges_follows_tokens(monkeypatch):
